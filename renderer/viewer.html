@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>사진</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="viewer-window">
+  <div id="viewer-stage">
+    <img id="viewer-img" draggable="false" />
+  </div>
+  <div id="viewer-bar">
+    <button id="v-out" data-tip="축소 (−)">−</button>
+    <button id="v-reset" data-tip="원래 크기로 (더블클릭)">100%</button>
+    <button id="v-in" data-tip="확대 (+)">＋</button>
+    <div class="v-sep"></div>
+    <button id="v-save" data-tip="이미지를 파일로 저장">💾</button>
+  </div>
+  <script src="viewer.js"></script>
+</body>
+</html>

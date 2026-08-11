@@ -1,0 +1,16 @@
+{
+  "name": "cc-talk",
+  "version": "0.1.0",
+  "description": "KakaoTalk-style desktop UI for managing multiple Claude Code sessions",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^33.0.0"
+  },
+  "dependencies": {
+    "dompurify": "^3.4.13",
+    "markdown-it": "^15.0.0"
+  }
+}

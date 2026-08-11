@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>CC Talk</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="room-window">
+  <div id="chat-view">
+    <header id="chat-header">
+      <div>
+        <div id="chat-title"></div>
+        <div id="chat-sub"></div>
+      </div>
+      <div class="header-actions">
+        <button id="btn-kill" data-tip="세션 종료 — 프로세스를 내리고, 다음 메시지 때 이어서 재시작">⏻</button>
+      </div>
+    </header>
+
+    <div id="messages"></div>
+
+    <div id="pending-bar" class="hidden"></div>
+
+    <div id="attach-bar" class="hidden"></div>
+
+    <div id="slash-menu" class="hidden"></div>
+
+    <footer id="composer">
+      <textarea id="input" rows="1" placeholder="메시지 입력 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
+      <button id="btn-stop" class="hidden" data-tip="작업 중단 — 이번 턴만 멈추고 세션은 유지"><span class="stop-icon"></span></button>
+      <button id="btn-send" data-tip="전송 (Enter)">전송</button>
+    </footer>
+
+    <div id="statusbar"></div>
+  </div>
+
+  <div id="drop-overlay" class="hidden">
+    <div class="drop-inner">📎 여기에 놓으면 첨부돼요<br /><span>사진은 이미지로, 파일은 경로로 전달</span></div>
+  </div>
+
+  <div id="model-picker" class="hidden">
+    <div class="picker-card">
+      <div class="picker-title">모델 선택 <span>이 방(세션)에만 적용</span></div>
+      <div id="model-list"></div>
+    </div>
+  </div>
+  <script src="room.js"></script>
+</body>
+</html>

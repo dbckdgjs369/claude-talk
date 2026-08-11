@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <title>CC Talk</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body class="list-window">
+  <div id="sidebar">
+    <div id="sidebar-header">
+      <span class="title">채팅</span>
+      <div class="header-btns">
+        <button id="btn-theme" data-tip="다크/라이트 전환">🌗</button>
+        <button id="btn-new" data-tip="새 채팅방 — 프로젝트 폴더를 골라 세션 시작">+</button>
+      </div>
+    </div>
+    <div id="room-list"></div>
+    <div id="list-empty" class="hidden">
+      <div class="big">💬</div>
+      <p><b>+</b> 버튼으로 프로젝트 폴더를 열어<br />첫 채팅방을 만들어봐</p>
+    </div>
+  </div>
+  <div id="ctx-menu" class="hidden">
+    <div class="ctx-item" data-action="rename">✏️ 이름 변경</div>
+    <div class="ctx-item danger" data-action="delete">🗑️ 삭제</div>
+  </div>
+
+  <div id="rename-modal" class="hidden">
+    <div class="modal-card">
+      <div class="modal-title">방 이름 변경</div>
+      <input id="rename-input" type="text" maxlength="80" />
+      <div class="modal-sub">터미널 claude --resume 목록에도 반영돼요</div>
+      <div class="modal-actions">
+        <button id="rename-cancel">취소</button>
+        <button id="rename-ok">변경</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="list.js"></script>
+</body>
+</html>
