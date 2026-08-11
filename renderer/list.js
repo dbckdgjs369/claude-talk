@@ -16,11 +16,41 @@ function fmtTime(iso) {
   return `${d.getMonth() + 1}월 ${d.getDate()}일`;
 }
 
-function avatarEmoji(name) {
-  const emojis = ['🦊', '🐸', '🐙', '🦉', '🐳', '🦄', '🐯', '🐨', '🦁', '🐼'];
+// Claude 픽셀 캐릭터 아바타. 방 ID 해시로 포즈가 갈린다 (같은 방은 항상 같은 포즈).
+const AVATAR_POSES = 6;
+
+function claudeAvatar(key) {
   let h = 0;
-  for (const ch of name) h = (h * 31 + ch.codePointAt(0)) >>> 0;
-  return emojis[h % emojis.length];
+  for (const ch of String(key)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  const pose = h % AVATAR_POSES;
+
+  const O = '#d97757'; // Claude 오렌지
+  const D = '#2b1a16'; // 눈
+  const px = (x, y, w, hh, fill) => `<rect x="${x}" y="${y}" width="${w}" height="${hh}" fill="${fill}"/>`;
+
+  const parts = [px(3, 3, 10, 7, O)]; // 몸통
+
+  // 양옆 팔 — 포즈에 따라 한쪽을 위로 든다
+  parts.push(px(2, pose === 4 ? 3 : 5, 1, 2, O));
+  parts.push(px(13, pose === 5 ? 3 : 5, 1, 2, O));
+
+  // 눈 — 정면/좌/우 보기, 윙크
+  const dx = pose === 1 ? -1 : pose === 2 ? 1 : 0;
+  if (pose === 3) {
+    parts.push(px(5.5, 5, 1.5, 2.5, D));
+    parts.push(px(9.5, 6, 1.5, 1, D)); // 감은 쪽
+  } else {
+    parts.push(px(5.5 + dx, 5, 1.5, 2.5, D));
+    parts.push(px(9.5 + dx, 5, 1.5, 2.5, D));
+  }
+
+  // 다리 — 포즈에 따라 한쪽을 살짝 든다
+  parts.push(px(4.5, 10, 1, pose === 2 ? 1 : 1.6, O));
+  parts.push(px(6.5, 10, 1, 1.6, O));
+  parts.push(px(8.5, 10, 1, 1.6, O));
+  parts.push(px(10.5, 10, 1, pose === 1 ? 1 : 1.6, O));
+
+  return `<svg class="avatar-char" viewBox="0 0 16 16" shape-rendering="crispEdges">${parts.join('')}</svg>`;
 }
 
 function render() {
@@ -46,7 +76,7 @@ function render() {
     const preview = title !== r.name ? `${r.name} · ${basePreview}` : basePreview;
 
     el.innerHTML = `
-      <div class="avatar">${avatarEmoji(r.name)}<div class="status-dot ${r.state}"></div></div>
+      <div class="avatar">${claudeAvatar(r.id || r.name)}<div class="status-dot ${r.state}"></div></div>
       <div class="body">
         <div class="name"></div>
         <div class="preview ${working ? 'typing' : ''}"></div>

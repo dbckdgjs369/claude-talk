@@ -113,6 +113,10 @@ body.list-window { background: var(--bg-sidebar); }
   flex-shrink: 0;
   position: relative;
 }
+.room .avatar .avatar-char {
+  width: 30px; height: 30px;
+  display: block;
+}
 .room .avatar .status-dot {
   position: absolute;
   right: -2px; bottom: -2px;
@@ -480,15 +484,26 @@ body.viewer-window {
   color: var(--fg);
   font-family: inherit;
   font-size: 14px;
-  padding: 10px 14px;
+  line-height: 1.5;
+  padding: 11px 16px;
+  min-height: 45px;   /* 1줄 = 21(line-height) + 22(padding) + 2(border) */
   max-height: 140px;
   outline: none;
+  transition: border-color .15s ease, background .15s ease;
+  /* 카톡처럼 스크롤바를 숨긴다 — 한도까지 자라고, 넘치면 커서 따라 조용히 스크롤 */
+  scrollbar-width: none;
 }
-#input:focus { border-color: #4a4c55; }
+#input::-webkit-scrollbar { width: 0; height: 0; display: none; }
+#input::placeholder { color: var(--fg-dim); }
+#input:focus {
+  border-color: var(--accent);
+  background: var(--bg-elev);
+}
 #btn-send {
   background: var(--accent);
   border: none;
   border-radius: 12px;
+  min-height: 45px;
   padding: 10px 18px;
   font-weight: 800;
   font-size: 13px;
@@ -496,21 +511,20 @@ body.viewer-window {
 }
 #btn-send:hover { filter: brightness(1.08); }
 
-/* 정지 버튼 — 네모 */
-#btn-stop {
-  width: 40px; height: 40px;
-  border: none;
-  border-radius: 8px;
+/* 정지 버튼 — 헤더의 전원 버튼 옆, 빨간 네모 */
+.header-actions #btn-stop {
   background: var(--badge);
-  cursor: pointer;
-  display: flex;
+  border-color: transparent;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 5px 10px;
   flex-shrink: 0;
 }
-#btn-stop:hover { filter: brightness(1.15); }
+.header-actions #btn-stop:hover { background: var(--badge); filter: brightness(1.15); }
 #btn-stop .stop-icon {
-  width: 13px; height: 13px;
+  display: block;
+  width: 11px; height: 11px;
   background: #fff;
   border-radius: 2px;
 }
@@ -579,14 +593,21 @@ body.viewer-window {
   content: attr(data-tip);
   position: absolute;
   right: 0;
-  white-space: nowrap;
-  background: #0d0d10;
-  color: var(--fg);
-  border: 1px solid var(--border);
+  /* 긴 설명은 줄바꿈 — 예전엔 nowrap이라 창 폭만큼 길게 늘어졌음 */
+  width: max-content;
+  max-width: 260px;
+  white-space: normal;
+  text-align: left;
+  /* 테마와 무관하게 어두운 말풍선 + 밝은 글자로 고정 (라이트 모드에서 글자가 묻히던 문제) */
+  background: #23242a;
+  color: #f2f3f5;
+  border: 1px solid rgba(255, 255, 255, .1);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
   border-radius: 8px;
   padding: 6px 10px;
   font-size: 11.5px;
   font-weight: 400;
+  line-height: 1.4;
   opacity: 0;
   pointer-events: none;
   transition: opacity .12s ease .25s;

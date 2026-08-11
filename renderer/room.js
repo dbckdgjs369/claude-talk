@@ -237,7 +237,7 @@ function send() {
   ipcRenderer.invoke('room:send', roomId, text,
     pendingImages.map((p) => ({ media_type: p.mediaType, data: p.base64 })));
   inputEl.value = '';
-  inputEl.style.height = 'auto';
+  autoGrow();
   pendingImages = [];
   renderAttachBar();
 }
@@ -290,6 +290,7 @@ function completeSlash(cmd) {
     return;
   }
   inputEl.value = '/' + cmd + ' ';
+  autoGrow();
   inputEl.focus();
 }
 
@@ -436,9 +437,16 @@ inputEl.addEventListener('keydown', (e) => {
     send();
   }
 });
-inputEl.addEventListener('input', () => {
+// border-box라 scrollHeight엔 테두리가 빠져 있음 — 그만큼 더해야 마지막 줄이 안 잘림
+function autoGrow() {
   inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 140) + 'px';
+  const border = inputEl.offsetHeight - inputEl.clientHeight;
+  inputEl.style.height = Math.min(inputEl.scrollHeight + border, 140) + 'px';
+}
+autoGrow();
+
+inputEl.addEventListener('input', () => {
+  autoGrow();
   renderSlashMenu();
 });
 inputEl.addEventListener('blur', () => setTimeout(closeSlashMenu, 150));

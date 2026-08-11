@@ -4,10 +4,29 @@
   "description": "KakaoTalk-style desktop UI for managing multiple Claude Code sessions",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "icon": "node build/make-icon.js",
+    "dist": "electron-builder --mac --arm64 --x64"
+  },
+  "build": {
+    "appId": "com.dbckdgjs369.cctalk",
+    "productName": "CC Talk",
+    "files": ["main.js", "lib/**", "renderer/**", "package.json"],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": "dmg",
+      "identity": "-",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
+      "title": "CC Talk"
+    }
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.0.0",
+    "electron-builder": "^26.15.3"
   },
   "dependencies": {
     "dompurify": "^3.4.13",

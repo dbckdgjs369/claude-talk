@@ -393,6 +393,11 @@ function pollFileChanges() {
 }
 
 app.whenReady().then(() => {
+  // 패키징된 앱은 .icns를 쓰지만, 개발 실행(npm start)은 Electron 기본 아이콘이라 직접 지정
+  if (!app.isPackaged && process.platform === 'darwin') {
+    const icon = path.join(__dirname, 'build', 'icon.png');
+    if (fs.existsSync(icon)) app.dock.setIcon(icon);
+  }
   loadWinState();
   store = new RoomsStore(app.getPath('userData'));
   // 과거 레이스로 잘못 합류된 quota-probe 방 제거 (세션 파일이 이미 지워져 살릴 수 없는 좀비 방)

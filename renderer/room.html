@@ -13,6 +13,7 @@
         <div id="chat-sub"></div>
       </div>
       <div class="header-actions">
+        <button id="btn-stop" class="hidden" data-tip="작업 중단 — 이번 턴만 멈추고 세션은 유지"><span class="stop-icon"></span></button>
         <button id="btn-kill" data-tip="세션 종료 — 프로세스를 내리고, 다음 메시지 때 이어서 재시작">⏻</button>
       </div>
     </header>
@@ -26,8 +27,7 @@
     <div id="slash-menu" class="hidden"></div>
 
     <footer id="composer">
-      <textarea id="input" rows="1" placeholder="메시지 입력 (Enter 전송, Shift+Enter 줄바꿈)"></textarea>
-      <button id="btn-stop" class="hidden" data-tip="작업 중단 — 이번 턴만 멈추고 세션은 유지"><span class="stop-icon"></span></button>
+      <textarea id="input" rows="1" placeholder="메시지 입력" data-tip="Enter 전송 · Shift+Enter 줄바꿈"></textarea>
       <button id="btn-send" data-tip="전송 (Enter)">전송</button>
     </footer>
 
