@@ -24,6 +24,9 @@ const roomId = new URLSearchParams(window.location.search).get('id');
 const messagesEl = document.getElementById('messages');
 const inputEl = document.getElementById('input');
 const attachBarEl = document.getElementById('attach-bar');
+const jumpBtnEl = document.getElementById('jump-bottom');
+const taskPanelEl = document.getElementById('task-panel');
+const taskListEl = document.getElementById('task-list');
 
 const IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
 const MAX_IMAGE_BYTES = 4.5 * 1024 * 1024; // API 이미지 제한(~5MB) 여유분
@@ -32,6 +35,33 @@ let pendingImages = []; // {name, mediaType, base64}
 let roomState = 'offline';
 let roomInfo = { model: null, slashCommands: [] };
 let quota = null; // { session: %, week: % }
+
+// ---------- 스크롤 추적 ----------
+// Claude가 스트리밍하는 동안 델타마다 맨 아래로 밀면, 위로 올려 이전 내용을 읽던
+// 사용자가 계속 끌려 내려간다. 하단에 붙어 있을 때만 따라가고, 올려둔 상태면 가만히 둔다.
+const STICK_PX = 80; // 이 정도 여유는 "하단에 있다"로 친다 (한 줄 늘어난 정도)
+let stickToBottom = true;
+
+const bottomGap = () => messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
+
+// 스크롤이 바닥에서 떨어지면 추적 해제, 다시 붙으면 재개.
+// 프로그램이 scrollTop을 바꿔도 이 이벤트가 돌지만, 그때는 바닥이라 true로 유지된다.
+messagesEl.addEventListener('scroll', () => {
+  stickToBottom = bottomGap() <= STICK_PX;
+  jumpBtnEl?.classList.toggle('hidden', stickToBottom);
+});
+
+function scrollToBottom({ force = false } = {}) {
+  // 검색 중에는 결과 위치를 지킨다. 결과가 하필 하단 근처면 stickToBottom이 true로
+  // 남아 스트리밍이 화면을 끌어내리기 때문에 플래그만으로는 부족하다
+  if (searchOpen && !force) return;
+  if (!force && !stickToBottom) return;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  stickToBottom = true;
+  jumpBtnEl?.classList.add('hidden');
+}
+
+jumpBtnEl.onclick = () => scrollToBottom({ force: true });
 
 // 헤더 여백이 창 버튼 위치를 따라가게 (mac=왼쪽 신호등, Windows=오른쪽 오버레이)
 document.body.classList.add(process.platform === 'win32' ? 'win' : 'mac');
@@ -95,6 +125,162 @@ function fmtTime(iso) {
   return `${ampm} ${h}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+// ---------- 대화 검색 (Cmd/Ctrl+F) ----------
+// 방을 열면 세션 전체가 DOM에 그려져 있으므로(최대 ~2,700개) DOM만 훑어도 누락이 없다.
+// jsonl을 따로 파싱하면 "화면에 없는 결과"를 가리키게 되는 문제가 생겨 그렇게 하지 않았다.
+const searchBarEl = document.getElementById('search-bar');
+const searchInputEl = document.getElementById('search-input');
+const searchCountEl = document.getElementById('search-count');
+let searchOpen = false;
+let searchHits = []; // <mark> 엘리먼트들 (문서 순서)
+let searchIdx = -1;
+
+function clearHighlights() {
+  for (const m of searchHits) {
+    const p = m.parentNode;
+    if (!p) continue;
+    p.replaceChild(document.createTextNode(m.textContent), m);
+    p.normalize(); // 쪼갠 텍스트 노드를 다시 합쳐야 다음 검색에서 경계를 넘는 일치를 놓치지 않는다
+  }
+  searchHits = [];
+  searchIdx = -1;
+}
+
+function highlight(query) {
+  clearHighlights();
+  const q = query.trim().toLowerCase();
+  if (!q) return;
+
+  // 워커를 돌면서 DOM을 고치면 순회가 깨진다 → 대상 노드를 먼저 모은다
+  const walker = document.createTreeWalker(messagesEl, NodeFilter.SHOW_TEXT);
+  const targets = [];
+  while (walker.nextNode()) {
+    const v = walker.currentNode.nodeValue;
+    if (v && v.toLowerCase().includes(q)) targets.push(walker.currentNode);
+  }
+
+  for (const node of targets) {
+    let rest = node;
+    let at = rest.nodeValue.toLowerCase().indexOf(q);
+    while (at !== -1) {
+      const hit = rest.splitText(at);
+      const after = hit.splitText(q.length);
+      const mark = document.createElement('mark');
+      mark.className = 'search-hit';
+      mark.textContent = hit.nodeValue;
+      hit.parentNode.replaceChild(mark, hit);
+      searchHits.push(mark);
+      rest = after;
+      at = rest.nodeValue.toLowerCase().indexOf(q);
+    }
+  }
+}
+
+function updateSearchCount() {
+  const n = searchHits.length;
+  searchCountEl.textContent = !searchInputEl.value.trim() ? '' : n ? `${searchIdx + 1}/${n}` : '결과 없음';
+  searchCountEl.classList.toggle('empty', !!searchInputEl.value.trim() && n === 0);
+}
+
+function gotoHit(i) {
+  if (!searchHits.length) return updateSearchCount();
+  searchIdx = (i + searchHits.length) % searchHits.length;
+  for (const m of searchHits) m.classList.remove('current');
+  const m = searchHits[searchIdx];
+  m.classList.add('current');
+  // 접힌 도구 줄(nowrap+말줄임) 안이면 펼쳐야 실제로 보인다 — 안 그러면 "5건인데 안 보임"이 된다
+  m.closest('.msg.tool')?.classList.add('expanded');
+  m.scrollIntoView({ block: 'center' });
+  updateSearchCount();
+}
+
+function runSearch() {
+  highlight(searchInputEl.value);
+  searchIdx = -1;
+  if (searchHits.length) gotoHit(0);
+  else updateSearchCount();
+}
+
+function openSearch() {
+  searchOpen = true;
+  searchBarEl.classList.remove('hidden');
+  searchInputEl.focus();
+  searchInputEl.select();
+  if (searchInputEl.value.trim()) runSearch();
+}
+
+function closeSearch() {
+  searchOpen = false;
+  searchBarEl.classList.add('hidden');
+  clearHighlights();
+  updateSearchCount();
+  inputEl.focus();
+}
+
+searchInputEl.addEventListener('input', runSearch);
+searchInputEl.addEventListener('keydown', (e) => {
+  if (e.isComposing) return; // 한글 조합 중 Enter는 확정용이므로 가로채지 않는다
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    gotoHit(searchIdx + (e.shiftKey ? -1 : 1));
+  }
+});
+document.getElementById('search-next').onclick = () => gotoHit(searchIdx + 1);
+document.getElementById('search-prev').onclick = () => gotoHit(searchIdx - 1);
+document.getElementById('search-close').onclick = closeSearch;
+
+// ---------- 할 일 패널 ----------
+// 대화 흐름에 카드로 쌓지 않고 헤더 아래 고정한다. TODO는 "지금 상태"가 중요하고,
+// 갱신될 때마다 카드가 쌓이면 대화가 밀려나기 때문.
+const TASK_ICON = { completed: '☑', in_progress: '▶', pending: '☐' };
+let tasksOpen = false;
+
+function renderTasks(summary) {
+  const items = summary?.items || [];
+  taskPanelEl.classList.toggle('hidden', items.length === 0);
+  if (!items.length) return;
+
+  const done = summary.done || 0;
+  const total = summary.total || items.length;
+  document.getElementById('task-count').textContent = `${done}/${total}`;
+  document.getElementById('task-progress-fill').style.width = total ? (done / total) * 100 + '%' : '0%';
+  // 진행 중인 항목이 있으면 접힌 상태에서도 그게 보이게 라벨에 얹는다
+  const running = items.find((t) => t.status === 'in_progress');
+  document.getElementById('task-label').textContent = running ? running.subject : '할 일';
+
+  taskListEl.innerHTML = '';
+  for (const t of items) {
+    const li = document.createElement('li');
+    li.className = 'task-item ' + t.status;
+    const icon = document.createElement('span');
+    icon.className = 'task-icon';
+    icon.textContent = TASK_ICON[t.status] || '☐';
+    const txt = document.createElement('span');
+    txt.textContent = t.subject;
+    li.append(icon, txt);
+    taskListEl.appendChild(li);
+  }
+}
+
+document.getElementById('task-bar').onclick = () => {
+  tasksOpen = !tasksOpen;
+  taskListEl.classList.toggle('hidden', !tasksOpen);
+  document.getElementById('task-caret').textContent = tasksOpen ? '▾' : '▸';
+};
+
+ipcRenderer.on('room:tasks', (e, summary) => renderTasks(summary));
+
+// 말풍선 안 사진의 표시 크기. 가로·세로 어느 쪽도 220을 넘지 않게 원본 비율로 줄인다.
+// 원본보다 키우지는 않는다 (작은 썸네일이 뿌옇게 늘어나는 걸 막으려고 scale 상한 1).
+// width만 지정하고 height는 auto — 좁은 창에서 CSS max-width:100%가 먹을 때도 비율이 유지된다.
+const BUBBLE_IMG_MAX = 220;
+function sizeBubbleImage(img) {
+  const { naturalWidth: w, naturalHeight: h } = img;
+  if (!w || !h) return;
+  const scale = Math.min(BUBBLE_IMG_MAX / w, BUBBLE_IMG_MAX / h, 1);
+  img.style.width = Math.round(w * scale) + 'px';
+}
+
 function appendMessage(msg, { scroll = true } = {}) {
   // 대기줄 메시지는 대화 흐름이 아니라 입력창 위 고정 영역에
   if (msg.pending) {
@@ -127,6 +313,7 @@ function appendMessage(msg, { scroll = true } = {}) {
       for (const src of msg.images) {
         const img = document.createElement('img');
         img.className = 'bubble-img';
+        img.onload = () => sizeBubbleImage(img);
         img.src = src;
         img.onclick = () => ipcRenderer.invoke('image:openViewer', src); // 별도 뷰어 창
         bubble.appendChild(img);
@@ -147,7 +334,7 @@ function appendMessage(msg, { scroll = true } = {}) {
   }
   messagesEl.appendChild(el);
   updateTypingIndicator();
-  if (scroll) messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (scroll) scrollToBottom();
 }
 
 // 상태줄: 지금 뭘 하는지 + 경과 시간 ("Bash 실행 중 · 47초")
@@ -165,7 +352,7 @@ function updateTypingIndicator() {
     el.className = 'typing-indicator';
     el.textContent = statusText();
     messagesEl.appendChild(el);
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    scrollToBottom();
   } else if (working && existing) {
     existing.textContent = statusText();
   } else if (!working && existing) {
@@ -194,7 +381,7 @@ ipcRenderer.on('room:stream-text', (e, text) => {
     messagesEl.insertBefore(streamEl, ind || null);
   }
   streamEl.querySelector('.bubble').innerHTML = renderMarkdown(text);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  scrollToBottom(); // 위로 올려둔 상태면 따라가지 않는다
 });
 
 const MODEL_FAMILIES = ['fable', 'mythos', 'opus', 'sonnet', 'haiku'];
@@ -237,6 +424,7 @@ function send() {
     openModelPicker();
     return;
   }
+  scrollToBottom({ force: true }); // 내가 보냈으면 답을 봐야 하니 다시 하단에 붙인다
   ipcRenderer.invoke('room:send', roomId, text,
     pendingImages.map((p) => ({ media_type: p.mediaType, data: p.base64 })));
   inputEl.value = '';
@@ -462,14 +650,21 @@ document.getElementById('btn-stop').onclick = () => {
   ipcRenderer.invoke('room:interrupt', roomId);
 };
 
-// ESC 우선순위: 모델 픽커 > 자동완성 > 창 숨김 (세션은 계속 돌아감)
+// ESC 우선순위: 모델 픽커 > 자동완성 > 검색 > 창 숨김 (세션은 계속 돌아감)
 window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+    e.preventDefault();
+    openSearch();
+    return;
+  }
   if (e.key === 'Escape' && !e.isComposing) {
     e.preventDefault();
     if (!pickerEl.classList.contains('hidden')) {
       pickerEl.classList.add('hidden');
     } else if (!slashMenuEl.classList.contains('hidden')) {
       closeSlashMenu();
+    } else if (searchOpen) {
+      closeSearch(); // 검색 중 ESC는 창을 숨기지 않고 검색만 닫는다
     } else {
       ipcRenderer.invoke('room:hide', roomId);
     }
@@ -529,10 +724,14 @@ ipcRenderer.on('room:queue-flushed', () => {
 
 // 터미널에서 대화가 이어지면 전체 다시 그리기
 ipcRenderer.on('room:history-reset', (e, messages) => {
+  // 통째로 다시 그리면 스크롤 위치가 날아간다. 읽던 중이었다면 바닥에서 떨어진
+  // 거리를 기준으로 되돌려 준다 (터미널에서 대화가 이어져도 읽던 자리를 유지)
+  const prevGap = bottomGap();
   streamEl = null;
   messagesEl.innerHTML = '';
   for (const m of messages) appendMessage(m, { scroll: false });
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  if (stickToBottom) scrollToBottom({ force: true });
+  else messagesEl.scrollTop = messagesEl.scrollHeight - messagesEl.clientHeight - prevGap;
 });
 
 (async () => {
@@ -544,7 +743,8 @@ ipcRenderer.on('room:history-reset', (e, messages) => {
   lastRoomSummary = res.room;
   renderHeader(res.room);
   updateStatusbar();
+  renderTasks(res.tasks);
   for (const m of res.messages) appendMessage(m, { scroll: false });
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  scrollToBottom({ force: true }); // 방을 열 때는 항상 최신 메시지부터
   inputEl.focus();
 })();

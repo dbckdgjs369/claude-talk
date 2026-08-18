@@ -18,7 +18,28 @@
       </div>
     </header>
 
-    <div id="messages"></div>
+    <div id="search-bar" class="hidden">
+      <input id="search-input" type="text" placeholder="대화 검색" spellcheck="false" />
+      <span id="search-count"></span>
+      <button id="search-prev" data-tip="이전 (Shift+Enter)">↑</button>
+      <button id="search-next" data-tip="다음 (Enter)">↓</button>
+      <button id="search-close" data-tip="닫기 (ESC)">✕</button>
+    </div>
+
+    <div id="task-panel" class="hidden">
+      <button id="task-bar">
+        <span id="task-caret">▸</span>
+        <span id="task-label">할 일</span>
+        <span id="task-count"></span>
+        <span id="task-progress"><i id="task-progress-fill"></i></span>
+      </button>
+      <ul id="task-list" class="hidden"></ul>
+    </div>
+
+    <div id="messages-wrap">
+      <div id="messages"></div>
+      <button id="jump-bottom" class="hidden" data-tip="맨 아래로">↓</button>
+    </div>
 
     <div id="pending-bar" class="hidden"></div>
 

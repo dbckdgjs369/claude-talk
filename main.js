@@ -18,6 +18,7 @@ const { HeadlessSession } = require('./lib/engine');
 const fs = require('fs');
 const { scanPastSessions, deleteSessionFile, titleForFile, tailInfoForFile, renameSession, normalizeSdkMarkers } = require('./lib/sessions-index');
 const { sessionFileFor, parseFileSync } = require('./lib/transcript');
+const { taskSummary, foldTaskOps } = require('./lib/tasks');
 
 let mainWin = null;
 let store = null;
@@ -30,6 +31,25 @@ const truncate = (s, n) => {
   s = (s || '').replace(/\s+/g, ' ').trim();
   return s.length > n ? s.slice(0, n) + '…' : s;
 };
+
+// 알림 배너는 평문이라 마크다운 기호가 날것으로 노출된다 (`코드`, **굵게**, ## 제목 …).
+// 채팅창 렌더링은 그대로 두고 알림 본문에만 적용한다.
+function plainify(md) {
+  return String(md || '')
+    .replace(/```[\s\S]*?```/g, ' (코드) ') // 코드블록은 통째로 축약
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' (이미지) ')
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1') // 링크는 글자만
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '') // 제목 기호
+    .replace(/^\s*>\s?/gm, '') // 인용
+    .replace(/^\s*[-*+]\s+/gm, '') // 불릿
+    .replace(/^\s*\|.*\|\s*$/gm, ' ') // 표는 통째로 버림 (평문으로 옮기면 깨진다)
+    .replace(/\*\*([^*]+)\*\*/g, '$1')
+    .replace(/(^|\W)\*([^*\n]+)\*(?=\W|$)/g, '$1$2') // 기울임 (곱셈 기호와 헷갈리지 않게)
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 function roomSummary(room) {
   const s = sessions.get(room.id);
@@ -91,6 +111,10 @@ function ensureSession(room) {
     const w = roomWins.get(room.id);
     if (w && !w.isDestroyed()) w.webContents.send('room:queue-flushed');
   });
+  s.on('tasks', (summary) => {
+    const w = roomWins.get(room.id);
+    if (w && !w.isDestroyed()) w.webContents.send('room:tasks', summary);
+  });
   s.on('info', (info) => {
     room.model = info.model;
     if (info.slashCommands.length) {
@@ -108,6 +132,10 @@ function ensureSession(room) {
       streamTimer = null;
       streamPending = null;
     }
+    // 알림 본문용으로 마지막 "말"을 따로 들고 있는다.
+    // lastPreview는 도구 실행 줄까지 포함하므로(목록에선 그게 유용하다) 알림에 그대로 쓰면
+    // "작업 끝났다"는 알림에 🔧 Bash · cat > ... 같은 게 뜬다.
+    if (msg.role === 'assistant' && msg.text) s.lastSay = truncate(plainify(msg.text), 120);
     const prefix = msg.role === 'tool' ? '🔧 ' : msg.role === 'system' ? '⚠️ ' : '';
     const imgTag = msg.images?.length ? `📷 사진${msg.images.length > 1 ? ` ${msg.images.length}장` : ''} ` : '';
     room.lastPreview = prefix + imgTag + truncate(msg.text, 60);
@@ -133,10 +161,15 @@ function ensureSession(room) {
       }, 4000);
     }
     broadcast(room);
+    // 그 방 창을 보고 있으면 알릴 필요가 없다. 다른 앱에 있거나 창이 뒤에 있을 때만.
     if (!roomWinFocused(room.id)) {
       const n = new Notification({
-        title: room.name,
-        body: room.lastPreview || '응답이 끝났어요. 입력을 기다리는 중.',
+        // 제목이 폴더명이면 방이 여러 개일 때 구분이 안 된다 → 목록에 보이는 방 제목을 쓰고
+        // 폴더는 부제목으로 (subtitle은 macOS 전용, 다른 OS에선 무시됨)
+        title: room.aiTitle || room.name,
+        subtitle: room.aiTitle ? room.name : '',
+        // lastPreview로 떨어뜨리면 결국 도구 줄이 뜬다 — 그럴 바엔 일반 문구가 낫다
+        body: s.lastSay || '응답이 끝났어요. 입력을 기다리는 중.',
       });
       n.on('click', () => openRoomWindow(room.id));
       n.show();
@@ -396,7 +429,14 @@ function pollFileChanges() {
     // 그 방 창이 열려 있으면 내용도 다시 그리기
     const w = roomWins.get(room.id);
     if (w && !w.isDestroyed()) {
-      w.webContents.send('room:history-reset', parseFileSync(fp).filter((i) => i.kind === 'msg'));
+      // 터미널에서 이어간 대화에도 할 일 변경이 섞여 있을 수 있으므로 같이 다시 접는다
+      const items = parseFileSync(fp);
+      const s = sessions.get(room.id);
+      if (s) {
+        s.tasks = foldTaskOps(items.filter((i) => i.kind === 'task-op'));
+        w.webContents.send('room:tasks', taskSummary(s.tasks));
+      }
+      w.webContents.send('room:history-reset', items.filter((i) => i.kind === 'msg'));
     }
   }
 }
@@ -651,6 +691,7 @@ ipcMain.handle('room:init', (e, id) => {
   return {
     room: roomSummary(room),
     messages,
+    tasks: taskSummary(s.tasks), // history()가 세션 전체를 접어 채워둔 상태
     info: { model: room.model || null, slashCommands: room.slashCommands || globalSlashCommands },
     quota,
   };
