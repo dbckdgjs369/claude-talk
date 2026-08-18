@@ -116,7 +116,9 @@ function render() {
       ? (r.activity ? r.activity + '…' : 'Claude가 작업 중이에요')
       : (r.preview || '메시지를 보내 대화를 시작해봐');
     // 제목이 ai-title이면 폴더명을 미리보기 앞에 붙여 구분
-    const preview = title !== r.name ? `${r.name} · ${basePreview}` : basePreview;
+    let preview = title !== r.name ? `${r.name} · ${basePreview}` : basePreview;
+    // 분기 방은 어디서 갈라졌는지 밝힌다 — 이름이 원본과 비슷해 목록에서 헷갈리기 쉽다
+    if (r.forkedFrom) preview = `🌿 ${r.forkedFromName || '삭제된 방'}에서 분기 · ${basePreview}`;
 
     el.innerHTML = `
       <div class="avatar">${claudeAvatar(r.id || r.name)}<div class="status-dot ${r.state}"></div></div>
@@ -166,6 +168,10 @@ ctxMenuEl.addEventListener('click', (e) => {
     }
   } else if (action === 'rename') {
     openRenameModal(ctxRoom);
+  } else if (action === 'fork') {
+    ipcRenderer.invoke('room:fork', ctxRoom.id).then((res) => {
+      if (res?.error) alert(res.error);
+    });
   }
 });
 

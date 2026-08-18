@@ -281,7 +281,39 @@ function sizeBubbleImage(img) {
   img.style.width = Math.round(w * scale) + 'px';
 }
 
-function appendMessage(msg, { scroll = true } = {}) {
+// ---------- 분기 방: 물려받은 대화 접기 ----------
+// fork는 원본 대화를 물리적으로 복사하므로 새 방에도 전체가 들어온다.
+// 그대로 펼치면 새 대화가 100개 밑에 묻히니 앞부분은 접어둔다.
+let forkedAt = 0;
+
+function renderHistory(messages) {
+  streamEl = null;
+  messagesEl.innerHTML = '';
+  const inherited = Math.min(forkedAt, messages.length);
+
+  if (inherited > 0) {
+    const box = document.createElement('div');
+    box.className = 'inherited hidden';
+    const btn = document.createElement('button');
+    btn.className = 'inherited-toggle';
+    btn.textContent = `⤴ 분기 전 대화 ${inherited}개 보기`;
+    btn.onclick = () => {
+      const open = box.classList.toggle('hidden');
+      btn.textContent = open ? `⤴ 분기 전 대화 ${inherited}개 보기` : `⤵ 분기 전 대화 접기`;
+    };
+    messagesEl.append(btn, box);
+    for (const m of messages.slice(0, inherited)) appendMessage(m, { scroll: false, into: box });
+
+    const line = document.createElement('div');
+    line.className = 'fork-line';
+    line.textContent = '여기서 분기됨';
+    messagesEl.appendChild(line);
+  }
+
+  for (const m of messages.slice(inherited)) appendMessage(m, { scroll: false });
+}
+
+function appendMessage(msg, { scroll = true, into = null } = {}) {
   // 대기줄 메시지는 대화 흐름이 아니라 입력창 위 고정 영역에
   if (msg.pending) {
     addPendingRow(msg);
@@ -332,7 +364,8 @@ function appendMessage(msg, { scroll = true } = {}) {
     if (msg.role === 'user') el.append(time, bubble);
     else el.append(bubble, time);
   }
-  messagesEl.appendChild(el);
+  (into || messagesEl).appendChild(el);
+  if (into) return; // 접힌 영역에 채우는 중이면 타이핑 표시·스크롤은 건드리지 않는다
   updateTypingIndicator();
   if (scroll) scrollToBottom();
 }
@@ -775,9 +808,7 @@ ipcRenderer.on('room:history-reset', (e, messages) => {
   // 통째로 다시 그리면 스크롤 위치가 날아간다. 읽던 중이었다면 바닥에서 떨어진
   // 거리를 기준으로 되돌려 준다 (터미널에서 대화가 이어져도 읽던 자리를 유지)
   const prevGap = bottomGap();
-  streamEl = null;
-  messagesEl.innerHTML = '';
-  for (const m of messages) appendMessage(m, { scroll: false });
+  renderHistory(messages);
   if (stickToBottom) scrollToBottom({ force: true });
   else messagesEl.scrollTop = messagesEl.scrollHeight - messagesEl.clientHeight - prevGap;
 });
@@ -793,7 +824,8 @@ ipcRenderer.on('room:history-reset', (e, messages) => {
   updateStatusbar();
   renderPermButton();
   renderTasks(res.tasks);
-  for (const m of res.messages) appendMessage(m, { scroll: false });
+  forkedAt = res.forkedAt || 0;
+  renderHistory(res.messages);
   scrollToBottom({ force: true }); // 방을 열 때는 항상 최신 메시지부터
   inputEl.focus();
 })();

@@ -65,6 +65,9 @@ function roomSummary(room) {
     preview: room.lastPreview || '',
     time: room.lastTime || null,
     unread: unread.get(room.id) || 0,
+    // 분기 방이면 목록에서 원본을 알 수 있게 (원본이 삭제됐으면 이름은 비어 있다)
+    forkedFrom: room.forkedFrom || null,
+    forkedFromName: room.forkedFrom ? store.get(room.forkedFrom)?.aiTitle || store.get(room.forkedFrom)?.name || null : null,
   };
 }
 
@@ -119,7 +122,20 @@ function ensureSession(room) {
       normalizeSdkMarkers(sessionFileFor(room.dir, room.sessionId));
     }
   });
-  s.on('session-id', () => store.save());
+  s.on('session-id', (sid) => {
+    // 분기가 확정되면 forkFrom은 역할이 끝난다 (다음 기동은 자기 세션을 resume)
+    if (room.forkFrom) delete room.forkFrom;
+    // 20초 세션 스캐너가 이 파일을 먼저 발견해 별도 방으로 만들었을 수 있다 →
+    // 같은 세션을 가리키는 다른 방은 정리한다. 막기보다 확정 시점에 고치는 쪽이 확실하다
+    const dupes = store.rooms.filter((r) => r.id !== room.id && r.sessionId === sid);
+    if (dupes.length) {
+      store.rooms = store.rooms.filter((r) => !dupes.includes(r));
+      for (const d of dupes) {
+        if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('room:removed', d.id);
+      }
+    }
+    store.save();
+  });
   s.on('activity', () => broadcast(room));
   // 스트리밍 텍스트는 델타가 매우 잦으므로 60ms 스로틀로 방 창에 전달
   let streamPending = null;
@@ -634,6 +650,31 @@ ipcMain.handle('rooms:create', async () => {
 
 ipcMain.handle('room:openWindow', (e, id) => openRoomWindow(id));
 
+// 방 분기 — 원본을 그대로 두고 대화를 물려받은 새 방을 만든다.
+// 실제 세션 복사는 첫 턴에 `--resume <원본> --fork-session`으로 일어나므로 여기서는 표시만 해둔다.
+ipcMain.handle('room:fork', (e, id) => {
+  const src = store.get(id);
+  if (!src) return null;
+  if (!src.sessionId) return { error: '아직 대화가 없는 방은 분기할 수 없어요.' };
+
+  // 분기선을 그을 지점 = 지금까지의 메시지 개수
+  const inherited = ensureSession(src).history().length;
+  const room = store.add({
+    id: crypto.randomUUID(),
+    dir: src.dir,
+    name: src.name,
+    aiTitle: src.aiTitle ? src.aiTitle + ' (분기)' : null,
+    sessionId: null,
+    forkFrom: src.sessionId,
+    forkedFrom: src.id,
+    forkedAt: inherited,
+    lastPreview: src.lastPreview,
+    lastTime: new Date().toISOString(),
+  });
+  openRoomWindow(room.id);
+  return roomSummary(room);
+});
+
 // ---------- 사진 뷰어 창 ----------
 
 const viewerData = new Map(); // key → dataUrl
@@ -716,6 +757,7 @@ ipcMain.handle('room:init', (e, id) => {
     room: roomSummary(room),
     messages,
     tasks: taskSummary(s.tasks), // history()가 세션 전체를 접어 채워둔 상태
+    forkedAt: room.forkedAt || 0, // 앞 N개는 물려받은 대화 — 접어서 보여준다
     info: {
       model: room.model || null,
       slashCommands: room.slashCommands || globalSlashCommands,

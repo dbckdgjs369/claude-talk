@@ -235,6 +235,41 @@ body.room-window { background: var(--bg-chat); }
 }
 .header-actions button:hover { background: var(--hover); }
 
+/* ---------- 분기 방: 물려받은 대화 ---------- */
+.inherited-toggle {
+  align-self: center;
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px dashed var(--border);
+  border-radius: 999px;
+  padding: 4px 12px;
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.inherited-toggle:hover { background: var(--hover-soft); }
+.inherited { display: flex; flex-direction: column; gap: 10px; }
+.inherited.hidden { display: none !important; }
+/* 분기 지점 구분선 — 어디까지가 물려받은 대화인지 한눈에 */
+.fork-line {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  text-align: center;
+  justify-content: center;
+}
+.fork-line::before,
+.fork-line::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
 /* ---------- 대화 검색 (Cmd/Ctrl+F) ---------- */
 #search-bar {
   flex-shrink: 0;
