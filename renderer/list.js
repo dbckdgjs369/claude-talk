@@ -56,10 +56,50 @@ function claudeAvatar(key) {
   return `<svg class="avatar-char" viewBox="0 0 16 16" shape-rendering="crispEdges">${parts.join('')}</svg>`;
 }
 
+// ---------- 방 검색 ----------
+// 방 제목(ai-title)·폴더명으로 거른다. 대화 내용은 대상이 아니다 —
+// 그건 방 안의 Cmd+F가 하고, 여기서 하면 50개 세션 파일을 다 읽어야 한다.
+const searchEl = document.getElementById('list-search');
+const searchInputEl = document.getElementById('list-search-input');
+let searchQuery = '';
+
+const matchesQuery = (r) => {
+  if (!searchQuery) return true;
+  const q = searchQuery;
+  return (r.title || '').toLowerCase().includes(q) || (r.name || '').toLowerCase().includes(q);
+};
+
+function openListSearch() {
+  searchEl.classList.remove('hidden');
+  searchInputEl.focus();
+  searchInputEl.select();
+}
+
+function closeListSearch() {
+  searchEl.classList.add('hidden');
+  searchInputEl.value = '';
+  searchQuery = '';
+  render();
+}
+
+searchInputEl.addEventListener('input', () => {
+  searchQuery = searchInputEl.value.trim().toLowerCase();
+  render();
+});
+document.getElementById('list-search-close').onclick = closeListSearch;
+
 function render() {
-  const sorted = [...rooms.values()].sort((a, b) => (b.time || '').localeCompare(a.time || ''));
+  const all = [...rooms.values()].sort((a, b) => (b.time || '').localeCompare(a.time || ''));
+  const sorted = all.filter(matchesQuery);
   roomListEl.innerHTML = '';
-  document.getElementById('list-empty').classList.toggle('hidden', sorted.length > 0);
+  // 검색 중엔 "방을 만들어봐" 안내가 아니라 결과 없음이 맞다
+  document.getElementById('list-empty').classList.toggle('hidden', sorted.length > 0 || !!searchQuery);
+  document.getElementById('list-search-count').textContent = searchQuery
+    ? sorted.length
+      ? `${sorted.length}/${all.length}`
+      : '결과 없음'
+    : '';
+  document.getElementById('list-search-count').classList.toggle('empty', !!searchQuery && sorted.length === 0);
 
   for (const r of sorted) {
     const el = document.createElement('div');
@@ -192,15 +232,27 @@ document.getElementById('btn-new').onclick = async () => {
   }
 };
 
-// ESC 우선순위: 모달 닫기 > 메뉴 닫기 > 목록 창 숨김 (Dock 클릭으로 복귀)
+// ESC 우선순위: 모달 > 메뉴 > 검색 > 목록 창 숨김 (Dock 클릭으로 복귀)
 window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'f') {
+    e.preventDefault();
+    openListSearch();
+    return;
+  }
   if (e.key === 'Escape' && !e.isComposing) {
     e.preventDefault();
     const modal = document.getElementById('rename-modal');
     const menu = document.getElementById('ctx-menu');
     if (!modal.classList.contains('hidden')) modal.classList.add('hidden');
     else if (!menu.classList.contains('hidden')) menu.classList.add('hidden');
+    else if (!searchEl.classList.contains('hidden')) closeListSearch();
     else ipcRenderer.invoke('main:hide');
+  }
+  // 검색창에서 Enter → 첫 결과 열기 (목록에서 손 떼지 않고 바로 진입)
+  if (e.key === 'Enter' && !e.isComposing && document.activeElement === searchInputEl) {
+    e.preventDefault();
+    const first = roomListEl.firstElementChild;
+    if (first) first.click();
   }
 });
 

@@ -512,6 +512,51 @@ pickerEl.addEventListener('click', (e) => {
   if (e.target === pickerEl) pickerEl.classList.add('hidden');
 });
 
+// ---------- 권한 모드 픽커 ----------
+// 기본값은 따로 두지 않는다 — settings.json의 전역 설정을 따르고, 여기서 고르면 그 방만 덮어쓴다.
+// 세션이 떠 있으면 control_request로 즉시 반영되고, 꺼져 있으면 다음 기동 때 인자로 들어간다.
+const PERM_MODES = [
+  { id: 'bypassPermissions', name: '전부 허용', desc: '확인 없이 실행 (기본)' },
+  { id: 'acceptEdits', name: '편집만 자동 허용', desc: '파일 수정은 통과, 나머지는 확인' },
+  { id: 'plan', name: '계획만', desc: '실행하지 않고 계획만 세움' },
+];
+const PERM_SHORT = { bypassPermissions: '전부 허용', acceptEdits: '편집 허용', plan: '계획만' };
+const permPickerEl = document.getElementById('perm-picker');
+
+function openPermPicker() {
+  const listEl = document.getElementById('perm-list');
+  listEl.innerHTML = '';
+  for (const m of PERM_MODES) {
+    const cur = roomInfo.permissionMode === m.id;
+    const el = document.createElement('div');
+    el.className = 'model-item' + (cur ? ' current' : '');
+    el.innerHTML = `<div class="m-name"></div><div class="m-desc"></div>${cur ? '<div class="m-check">✓</div>' : ''}`;
+    el.querySelector('.m-name').textContent = m.name;
+    el.querySelector('.m-desc').textContent = m.desc;
+    el.onclick = () => {
+      permPickerEl.classList.add('hidden');
+      roomInfo.permissionMode = m.id; // 응답을 기다리지 않고 즉시 반영 (info 이벤트가 곧 확정해준다)
+      renderPermButton();
+      ipcRenderer.invoke('room:setPermissionMode', roomId, m.id);
+    };
+    listEl.appendChild(el);
+  }
+  permPickerEl.classList.remove('hidden');
+}
+
+function renderPermButton() {
+  const btn = document.getElementById('btn-perm');
+  const mode = roomInfo.permissionMode;
+  // 전부 허용은 기본 상태라 조용히, 제한이 걸린 모드만 눈에 띄게
+  btn.classList.toggle('restricted', !!mode && mode !== 'bypassPermissions');
+  btn.dataset.tip = `권한 모드: ${PERM_SHORT[mode] || '전역 설정'} — 클릭해서 변경`;
+}
+
+document.getElementById('btn-perm').onclick = openPermPicker;
+permPickerEl.addEventListener('click', (e) => {
+  if (e.target === permPickerEl) permPickerEl.classList.add('hidden');
+});
+
 // ---------- 첨부 (드래그앤드롭 / 붙여넣기) ----------
 
 function renderAttachBar() {
@@ -661,6 +706,8 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (!pickerEl.classList.contains('hidden')) {
       pickerEl.classList.add('hidden');
+    } else if (!permPickerEl.classList.contains('hidden')) {
+      permPickerEl.classList.add('hidden');
     } else if (!slashMenuEl.classList.contains('hidden')) {
       closeSlashMenu();
     } else if (searchOpen) {
@@ -686,6 +733,7 @@ ipcRenderer.on('room:update', (e, summary) => {
 
 ipcRenderer.on('room:info', (e, info) => {
   roomInfo = info;
+  renderPermButton();
   if (lastRoomSummary) renderHeader(lastRoomSummary);
   updateStatusbar();
 });
@@ -743,6 +791,7 @@ ipcRenderer.on('room:history-reset', (e, messages) => {
   lastRoomSummary = res.room;
   renderHeader(res.room);
   updateStatusbar();
+  renderPermButton();
   renderTasks(res.tasks);
   for (const m of res.messages) appendMessage(m, { scroll: false });
   scrollToBottom({ force: true }); // 방을 열 때는 항상 최신 메시지부터

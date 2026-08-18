@@ -87,6 +87,46 @@ body.list-window { background: var(--bg-sidebar); }
 #btn-theme { font-size: 14px; }
 #btn-new:hover, #btn-theme:hover { background: var(--bg-header); }
 
+/* 목록 창 방 검색 — 방 안의 Cmd+F와 같은 조작감으로 맞춘다 */
+#list-search {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 14px 8px;
+}
+#list-search-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-deep2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  color: var(--fg);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+}
+#list-search-input:focus { border-color: var(--accent); }
+#list-search-count {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--fg-dim);
+  font-variant-numeric: tabular-nums;
+}
+#list-search-count.empty { color: var(--badge); }
+#list-search-close {
+  flex-shrink: 0;
+  width: 24px; height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  font-size: 11px;
+  cursor: pointer;
+}
+#list-search-close:hover { background: var(--hover); }
+
 #room-list { flex: 1; overflow-y: auto; }
 
 #list-empty {
@@ -683,7 +723,9 @@ body.viewer-window {
 .slash-item.active { background: var(--active); color: var(--accent); }
 
 /* ---------- 모델 픽커 ---------- */
-#model-picker {
+/* 권한 픽커는 모델 픽커와 생김새를 공유한다 (.picker-card / .model-item 재사용) */
+#model-picker,
+#perm-picker {
   position: fixed;
   inset: 0;
   background: rgba(10, 10, 14, .6);
@@ -691,6 +733,12 @@ body.viewer-window {
   align-items: center;
   justify-content: center;
   z-index: 90;
+}
+
+/* 제한이 걸린 모드일 때만 방패를 눈에 띄게 — 전부 허용은 기본 상태라 조용히 둔다 */
+#btn-perm.restricted {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .picker-card {
   background: var(--bg-header);

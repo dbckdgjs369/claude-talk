@@ -80,6 +80,32 @@ function roomWinFocused(roomId) {
   return !!w && !w.isDestroyed() && w.isFocused();
 }
 
+// 발송한 알림을 붙잡아 둔다. 지역 변수로 두면 show() 직후 참조가 사라져 GC 대상이 되고,
+// 그러면 네이티브 알림은 화면에 남아 있는데 click 핸들러만 죽어 눌러도 아무 일이 없다.
+// (배너는 5초지만 알림 센터에서는 한참 뒤에도 누를 수 있어 실제로 걸린다)
+const liveNotifications = new Set();
+
+function notify(room, body) {
+  const n = new Notification({
+    // 제목이 폴더명이면 방이 여러 개일 때 구분이 안 된다 → 목록에 보이는 방 제목을 쓰고
+    // 폴더는 부제목으로 (subtitle은 macOS 전용, 다른 OS에선 무시됨)
+    title: room.aiTitle || room.name,
+    subtitle: room.aiTitle ? room.name : '',
+    body,
+  });
+  liveNotifications.add(n);
+  const release = () => liveNotifications.delete(n);
+  n.on('click', () => {
+    release();
+    openRoomWindow(room.id);
+  });
+  n.on('close', release);
+  n.on('failed', release);
+  // close가 안 오는 경우(알림 센터에 계속 쌓여 있는 등)를 대비한 상한 — 무한정 붙들지 않게
+  setTimeout(release, 10 * 60 * 1000).unref?.();
+  n.show();
+}
+
 function ensureSession(room) {
   let s = sessions.get(room.id);
   if (s) return s;
@@ -123,7 +149,13 @@ function ensureSession(room) {
     }
     store.save();
     const w = roomWins.get(room.id);
-    if (w && !w.isDestroyed()) w.webContents.send('room:info', { model: room.model, slashCommands: room.slashCommands || [] });
+    if (w && !w.isDestroyed()) {
+      w.webContents.send('room:info', {
+        model: room.model,
+        slashCommands: room.slashCommands || [],
+        permissionMode: info.permissionMode || s.permissionMode || null,
+      });
+    }
   });
   s.on('message', (msg) => {
     // 최종 메시지 확정 후 뒤늦게 나가는 스트림 묶음이 유령 버블(커서 잔상)을 만들지 않게 취소
@@ -163,16 +195,7 @@ function ensureSession(room) {
     broadcast(room);
     // 그 방 창을 보고 있으면 알릴 필요가 없다. 다른 앱에 있거나 창이 뒤에 있을 때만.
     if (!roomWinFocused(room.id)) {
-      const n = new Notification({
-        // 제목이 폴더명이면 방이 여러 개일 때 구분이 안 된다 → 목록에 보이는 방 제목을 쓰고
-        // 폴더는 부제목으로 (subtitle은 macOS 전용, 다른 OS에선 무시됨)
-        title: room.aiTitle || room.name,
-        subtitle: room.aiTitle ? room.name : '',
-        // lastPreview로 떨어뜨리면 결국 도구 줄이 뜬다 — 그럴 바엔 일반 문구가 낫다
-        body: s.lastSay || '응답이 끝났어요. 입력을 기다리는 중.',
-      });
-      n.on('click', () => openRoomWindow(room.id));
-      n.show();
+      notify(room, s.lastSay || '응답이 끝났어요. 입력을 기다리는 중.');
     }
   });
   return s;
@@ -319,6 +342,7 @@ function createMainWindow() {
 function openRoomWindow(roomId) {
   const existing = roomWins.get(roomId);
   if (existing && !existing.isDestroyed()) {
+    if (existing.isMinimized()) existing.restore(); // 최소화 상태면 show()만으론 안 올라온다
     existing.show();
     existing.focus();
     return;
@@ -692,7 +716,12 @@ ipcMain.handle('room:init', (e, id) => {
     room: roomSummary(room),
     messages,
     tasks: taskSummary(s.tasks), // history()가 세션 전체를 접어 채워둔 상태
-    info: { model: room.model || null, slashCommands: room.slashCommands || globalSlashCommands },
+    info: {
+      model: room.model || null,
+      slashCommands: room.slashCommands || globalSlashCommands,
+      // 방에서 고른 게 없으면 세션이 알려준 실효 모드(= 전역 설정)를 보여준다
+      permissionMode: room.permissionMode || s.permissionMode || null,
+    },
     quota,
   };
 });
@@ -706,6 +735,16 @@ ipcMain.handle('room:send', (e, id, text, images) => {
 ipcMain.handle('room:kill', (e, id) => {
   const s = sessions.get(id);
   if (s) s.kill();
+});
+
+const PERMISSION_MODES = ['bypassPermissions', 'acceptEdits', 'plan'];
+
+ipcMain.handle('room:setPermissionMode', (e, id, mode) => {
+  const room = store.get(id);
+  if (!room || !PERMISSION_MODES.includes(mode)) return null;
+  ensureSession(room).setPermissionMode(mode);
+  store.save();
+  return mode;
 });
 
 ipcMain.handle('room:interrupt', (e, id) => {

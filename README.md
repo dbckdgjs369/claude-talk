@@ -108,6 +108,9 @@ OS별로 갈리는 부분은 전부 `lib/platform.js` 한 곳에 모아뒀다.
 - **슬래시 커맨드**: `/` 입력 시 자동완성 (목록은 init 이벤트의 `slash_commands`에서 — 하드코딩 아님, 방별 캐시 + 전역 폴백). 인자 필요한 명령은 텍스트로 그대로 전송
 - **모델 픽커**: `/model` (인자 없이) → 네이티브 선택 카드. 현재 모델은 init의 `model` 필드로 표시(헤더에도 노출), 선택 시 `/model <alias>` 전송 — 세션 한정. 기본값 저장은 미지원(2단계)
 - 첨부: 사진 드래그/붙여넣기 → 이미지 블록으로 전송 (첨부칩 미리보기, 최대 4.5MB), 일반 파일 드래그 → 경로 삽입
+- **권한 모드**: 기본은 `settings.json` 전역 설정을 그대로 따른다(앱이 강제하지 않음). 헤더 🛡 버튼으로 방마다 덮어쓸 수 있고(`bypassPermissions`/`acceptEdits`/`plan`) `rooms.json`에 저장된다.
+  이미 돌고 있는 세션도 `control_request{subtype:'set_permission_mode'}`로 즉시 바뀐다 — TUI의 shift+tab에 해당.
+  현재 모드는 init·`system/status` 이벤트의 `permissionMode`로 읽는다. (`--permission-prompt-tool`은 CLI 2.1.x에 없음)
 
 ## 파일
 
@@ -131,6 +134,7 @@ v2에서 헤드리스로 전환하며 **그 클래스의 문제가 통째로 사
 
 ## 다음 단계 후보
 
-- permission 요청 네이티브 카드 (지금은 bypassPermissions 기본이라 이슈 없음; default 모드 지원하려면 `--permission-prompt-tool` 또는 Agent SDK `canUseTool`)
-- 마크다운 렌더링, 작업 중 스트리밍 표시(`--include-partial-messages`)
-- ESC(턴 중단) 버튼, electron-builder 패키징
+- plan 모드 승인 카드 — plan에서는 Claude가 계획만 세우고 멈추는데, 헤드리스에는
+  `ExitPlanMode`가 없어 스스로 빠져나오지 못한다. 앱이 "진행/취소" 카드를 띄우고
+  진행 시 `set_permission_mode`로 풀어주면 승인 UX가 된다
+- 세션 분기(fork), 방 목록 검색

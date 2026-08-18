@@ -13,6 +13,7 @@
         <div id="chat-sub"></div>
       </div>
       <div class="header-actions">
+        <button id="btn-perm" data-tip="권한 모드 — 이 방에만 적용">🛡</button>
         <button id="btn-stop" class="hidden" data-tip="작업 중단 — 이번 턴만 멈추고 세션은 유지"><span class="stop-icon"></span></button>
         <button id="btn-kill" data-tip="세션 종료 — 프로세스를 내리고, 다음 메시지 때 이어서 재시작">⏻</button>
       </div>
@@ -63,6 +64,13 @@
     <div class="picker-card">
       <div class="picker-title">모델 선택 <span>이 방(세션)에만 적용</span></div>
       <div id="model-list"></div>
+    </div>
+  </div>
+
+  <div id="perm-picker" class="hidden">
+    <div class="picker-card">
+      <div class="picker-title">권한 모드 <span>이 방에만 적용 · 즉시 반영</span></div>
+      <div id="perm-list"></div>
     </div>
   </div>
   <script src="room.js"></script>
