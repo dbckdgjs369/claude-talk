@@ -3,15 +3,20 @@
   "version": "0.1.0",
   "description": "KakaoTalk-style desktop UI for managing multiple Claude Code sessions",
   "main": "main.js",
+  "bin": {
+    "claude-talk": "bin/claude-talk.js"
+  },
   "scripts": {
     "start": "electron .",
     "icon": "node build/make-icon.js",
-    "dist": "electron-builder --mac --arm64 --x64"
+    "dist": "electron-builder --mac --arm64 --x64",
+    "dist:win": "electron-builder --win --x64",
+    "dist:win:dir": "electron-builder --win dir --x64"
   },
   "build": {
     "appId": "com.dbckdgjs369.cctalk",
     "productName": "CC Talk",
-    "files": ["main.js", "lib/**", "renderer/**", "package.json"],
+    "files": ["main.js", "bin/**", "lib/**", "renderer/**", "package.json"],
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": "dmg",
@@ -22,6 +27,25 @@
     },
     "dmg": {
       "title": "CC Talk"
+    },
+    "win": {
+      "icon": "build/icon.png",
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "CC Talk",
+      "artifactName": "CC-Talk-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "CC-Talk-${version}-portable.${ext}"
     }
   },
   "devDependencies": {

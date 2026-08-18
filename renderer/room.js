@@ -33,6 +33,9 @@ let roomState = 'offline';
 let roomInfo = { model: null, slashCommands: [] };
 let quota = null; // { session: %, week: % }
 
+// 헤더 여백이 창 버튼 위치를 따라가게 (mac=왼쪽 신호등, Windows=오른쪽 오버레이)
+document.body.classList.add(process.platform === 'win32' ? 'win' : 'mac');
+
 // 테마 적용 (목록 창의 토글과 동기화)
 (async () => {
   const theme = await ipcRenderer.invoke('theme:get');

@@ -1,8 +1,18 @@
 const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
 const readline = require('readline');
+const {
+  isMac,
+  isWin,
+  homeDir,
+  findClaude,
+  claudeEnv,
+  spawnShell,
+  CLAUDE_MISSING_HINT,
+  titleBarOptions,
+  applyTitleBarTheme,
+} = require('./lib/platform');
 const { RoomsStore } = require('./lib/rooms-store');
 const { HeadlessSession } = require('./lib/engine');
 const fs = require('fs');
@@ -154,7 +164,7 @@ function quotaProbeDir() {
 function cleanProbeSessions() {
   try {
     const enc = quotaProbeDir().normalize('NFC').replace(/[^a-zA-Z0-9-]/g, '-');
-    const pdir = path.join(process.env.HOME, '.claude', 'projects', enc);
+    const pdir = path.join(homeDir(), '.claude', 'projects', enc);
     for (const f of fs.readdirSync(pdir)) {
       const fp = path.join(pdir, f);
       if (fs.statSync(fp).isFile()) fs.unlinkSync(fp);
@@ -165,11 +175,8 @@ function cleanProbeSessions() {
 function refreshQuota() {
   const probeDir = quotaProbeDir();
   fs.mkdirSync(probeDir, { recursive: true });
-  const env = { ...process.env };
-  for (const k of Object.keys(env)) {
-    if (k.startsWith('CLAUDE') || k === 'npm_config_prefix') delete env[k];
-  }
-  const c = spawn('/bin/zsh', ['-ilc', 'claude -p --input-format stream-json --output-format stream-json --verbose'], {
+  const env = claudeEnv();
+  const c = spawnShell('claude -p --input-format stream-json --output-format stream-json --verbose', {
     cwd: probeDir,
     env,
     stdio: ['pipe', 'pipe', 'ignore'],
@@ -230,7 +237,9 @@ ipcMain.handle('theme:set', (e, theme) => {
   winState.theme = theme === 'light' ? 'light' : 'dark';
   saveWinState();
   for (const w of BrowserWindow.getAllWindows()) {
-    if (!w.isDestroyed()) w.webContents.send('theme-changed', winState.theme);
+    if (w.isDestroyed()) continue;
+    w.webContents.send('theme-changed', winState.theme);
+    applyTitleBarTheme(w, winState.theme); // Windows 오버레이 버튼 색도 같이 (mac/linux는 no-op)
   }
 });
 
@@ -262,7 +271,7 @@ function createMainWindow() {
     y: saved?.y,
     minWidth: 320,
     minHeight: 480,
-    titleBarStyle: 'hiddenInset',
+    ...titleBarOptions(winState.theme),
     backgroundColor: '#17181c',
     webPreferences: { nodeIntegration: true, contextIsolation: false },
   });
@@ -294,7 +303,7 @@ function openRoomWindow(roomId) {
     y: saved?.y,
     minWidth: 320,
     minHeight: 420,
-    titleBarStyle: 'hiddenInset',
+    ...titleBarOptions(winState.theme),
     backgroundColor: '#1e1f22',
     title: room.name,
     webPreferences: { nodeIntegration: true, contextIsolation: false },
@@ -392,14 +401,89 @@ function pollFileChanges() {
   }
 }
 
+// CLI 진입점(`claude-talk`)이 넘겨주는 작업 폴더. 개발 실행은 argv에 스크립트 경로가
+// 하나 더 끼므로 위치 대신 접두사로 찾는다.
+function dirArg(argv) {
+  const hit = (argv || []).find((a) => a.startsWith('--dir='));
+  if (!hit) return null;
+  const dir = hit.slice('--dir='.length);
+  try {
+    return fs.statSync(dir).isDirectory() ? dir : null;
+  } catch {
+    return null;
+  }
+}
+
+// 두 번 실행되면 rooms.json/window-state.json을 두 프로세스가 같이 쓰다 깨진다.
+// (Windows는 포터블 exe·바로가기 더블클릭으로 중복 실행이 쉽게 난다)
+// 겸사겸사 여기가 CLI 재진입 통로다 — 앱이 이미 떠 있을 때 `claude-talk`을 치면
+// 두 번째 프로세스는 즉시 죽고 argv만 원본 프로세스로 넘어온다.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+} else {
+  app.on('second-instance', (e, argv) => {
+    const dir = dirArg(argv);
+    if (dir && store) {
+      createRoomForDir(dir);
+      return;
+    }
+    if (!mainWin || mainWin.isDestroyed()) return;
+    if (mainWin.isMinimized()) mainWin.restore();
+    mainWin.show();
+    mainWin.focus();
+  });
+}
+
+// Windows 토스트 알림은 AppUserModelID가 설치본 것과 맞아야 뜬다 (없으면 조용히 무시됨)
+if (isWin) app.setAppUserModelId('com.dbckdgjs369.cctalk');
+
+// ---------- 에러 보고 ----------
+
+// 예외 하나로 앱이 내려가는 건 막되, 조용히 삼키지도 않는다.
+// 핵심은 중복 제거다 — 4초마다 도는 pollFileChanges에서 같은 에러가 계속 터지면
+// 다이얼로그가 무한히 쌓여 창을 닫아도 이길 수 없다 (실제로 겪음).
+// 같은 에러는 한 번만 띄우고, 총 3회를 넘으면 콘솔에만 남긴다.
+const seenErrors = new Set();
+const MAX_ERROR_DIALOGS = 3;
+let errorDialogsShown = 0;
+
+function reportError(title, err) {
+  const detail = err?.stack || String(err);
+  console.error(`[${title}]`, detail);
+
+  const sig = title + '|' + detail.slice(0, 300);
+  if (seenErrors.has(sig)) return; // 같은 에러 반복 — 이미 알렸다
+  seenErrors.add(sig);
+  if (errorDialogsShown >= MAX_ERROR_DIALOGS || !app.isReady()) return;
+  errorDialogsShown++;
+
+  const last = errorDialogsShown === MAX_ERROR_DIALOGS;
+  dialog
+    .showMessageBox({
+      type: 'error',
+      title,
+      message: title,
+      detail: detail.slice(0, 1200) + (last ? '\n\n(이후 오류는 콘솔에만 기록됩니다)' : ''),
+      buttons: ['확인'],
+      noLink: true,
+    })
+    .catch(() => {}); // 다이얼로그 실패가 또 예외를 던지지 않게
+}
+
+// 타이머·이벤트 콜백에서 새는 예외는 Electron 기본 동작으로는
+// "A JavaScript error occurred in the main process" + 앱 종료로 이어진다.
+// 방 하나가 삐끗했다고 창 전체가 내려갈 이유는 없다.
+process.on('uncaughtException', (err) => reportError('예상치 못한 오류', err));
+process.on('unhandledRejection', (err) => reportError('처리되지 않은 오류', err));
+
 app.whenReady().then(() => {
   // 패키징된 앱은 .icns를 쓰지만, 개발 실행(npm start)은 Electron 기본 아이콘이라 직접 지정
-  if (!app.isPackaged && process.platform === 'darwin') {
+  if (!app.isPackaged && isMac) {
     const icon = path.join(__dirname, 'build', 'icon.png');
     if (fs.existsSync(icon)) app.dock.setIcon(icon);
   }
   loadWinState();
-  store = new RoomsStore(app.getPath('userData'));
+  store = new RoomsStore(app.getPath('userData'), (err) => reportError('방 목록 저장 실패', err));
   // 과거 레이스로 잘못 합류된 quota-probe 방 제거 (세션 파일이 이미 지워져 살릴 수 없는 좀비 방)
   const probeRooms = store.rooms.filter((r) => r.dir === quotaProbeDir());
   if (probeRooms.length) {
@@ -410,6 +494,19 @@ app.whenReady().then(() => {
   const seeded = store.rooms.find((r) => r.slashCommands?.length);
   if (seeded) globalSlashCommands = seeded.slashCommands;
   createMainWindow();
+  // `claude-talk`으로 켠 경우: 목록 창은 띄워두고 해당 폴더 방을 바로 연다
+  const cliDir = dirArg(process.argv);
+  if (cliDir) createRoomForDir(cliDir);
+  // Windows에선 claude가 PATH에 없어 방마다 조용히 실패하는 일이 흔하다 → 처음에 한 번 명확히 알린다
+  if (isWin && !findClaude()) {
+    dialog.showMessageBox(mainWin, {
+      type: 'warning',
+      title: 'Claude Code CLI를 찾을 수 없습니다',
+      message: 'Claude Code CLI가 설치돼 있지 않거나 PATH에 없습니다.',
+      detail: CLAUDE_MISSING_HINT,
+      buttons: ['확인'],
+    });
+  }
   // 창 뜬 뒤 백그라운드로 과거 세션 합류 + 기존 방 제목 갱신 + sdk 마킹 정규화
   setTimeout(() => {
     importPastSessions();
@@ -445,13 +542,11 @@ app.on('quit', () => {
 
 ipcMain.handle('rooms:list', () => store.rooms.map(roomSummary));
 
-ipcMain.handle('rooms:create', async () => {
-  const res = await dialog.showOpenDialog(mainWin, {
-    title: '채팅방 열 프로젝트 폴더 선택',
-    properties: ['openDirectory', 'createDirectory'],
-  });
-  if (res.canceled || !res.filePaths[0]) return null;
-  const dir = res.filePaths[0];
+// 폴더로 새 방을 만들어 연다. 같은 폴더에 방이 이미 있어도 새로 만든다 —
+// 터미널에서 `claude`를 다시 치면 새 세션이 열리는 것과 같다. 한 프로젝트에서
+// 여러 세션을 병렬로 굴리는 게 정상 사용 패턴이므로 폴더로 묶지 않는다.
+// (dialog 선택과 CLI `claude-talk` 양쪽이 같이 쓴다)
+function createRoomForDir(dir) {
   const room = store.add({
     id: crypto.randomUUID(),
     dir,
@@ -461,7 +556,16 @@ ipcMain.handle('rooms:create', async () => {
     lastTime: null,
   });
   openRoomWindow(room.id);
-  return roomSummary(room);
+  return room;
+}
+
+ipcMain.handle('rooms:create', async () => {
+  const res = await dialog.showOpenDialog(mainWin, {
+    title: '채팅방 열 프로젝트 폴더 선택',
+    properties: ['openDirectory', 'createDirectory'],
+  });
+  if (res.canceled || !res.filePaths[0]) return null;
+  return roomSummary(createRoomForDir(res.filePaths[0]));
 });
 
 ipcMain.handle('room:openWindow', (e, id) => openRoomWindow(id));
@@ -479,7 +583,7 @@ ipcMain.handle('image:openViewer', (e, dataUrl) => {
     height: 700,
     minWidth: 320,
     minHeight: 280,
-    titleBarStyle: 'hiddenInset',
+    ...titleBarOptions(winState.theme),
     backgroundColor: '#0b0b0d',
     title: '사진',
     webPreferences: { nodeIntegration: true, contextIsolation: false },

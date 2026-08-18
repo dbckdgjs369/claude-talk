@@ -47,13 +47,19 @@ body.light {
 
 html, body { height: 100%; }
 body {
-  font-family: "Apple SD Gothic Neo", -apple-system, sans-serif;
+  font-family: "Apple SD Gothic Neo", -apple-system, "Segoe UI", "Malgun Gothic", sans-serif;
   color: var(--fg);
   overflow: hidden;
   user-select: none;
 }
 
 .hidden { display: none !important; }
+
+/* 창 버튼 자리 확보 — mac은 왼쪽 위 신호등이라 상단 여백,
+   Windows는 titleBarOverlay가 오른쪽 위를 덮으므로 오른쪽 여백이 필요하다.
+   (기본 CSS는 mac 기준으로 쓰여 있고, body.win에서만 되돌린다) */
+body.win #sidebar-header { padding-top: 10px; padding-right: 148px; }
+body.win #chat-header { padding-top: 12px; padding-right: 148px; }
 
 /* ---------- 목록 창 ---------- */
 body.list-window { background: var(--bg-sidebar); }

@@ -3,6 +3,9 @@ const { ipcRenderer } = require('electron');
 const roomListEl = document.getElementById('room-list');
 const rooms = new Map();
 
+// 헤더 여백이 창 버튼 위치를 따라가게 (mac=왼쪽 신호등, Windows=오른쪽 오버레이)
+document.body.classList.add(process.platform === 'win32' ? 'win' : 'mac');
+
 function fmtTime(iso) {
   if (!iso) return '';
   const d = new Date(iso);

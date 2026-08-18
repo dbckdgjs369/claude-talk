@@ -10,6 +10,83 @@ npm install
 npm start
 ```
 
+## 터미널에서 열기 (`claude-talk`)
+
+`claude`처럼 프로젝트 폴더에서 바로 방을 연다.
+
+```bash
+npm i -g .          # 소스 폴더에서 한 번 (또는 npm link)
+
+cd ~/projects/foo
+claude-talk         # foo 방이 열린다
+claude-talk ../bar  # 다른 폴더를 지정할 수도 있다
+```
+
+칠 때마다 **새 방**이 생긴다 — 터미널에서 `claude`를 다시 치면 새 세션이 열리는 것과 같다.
+한 프로젝트에서 세션을 여러 개 병렬로 굴리는 게 정상 패턴이라 폴더로 묶지 않는다.
+(`+` 버튼도 동일)
+
+앱이 이미 떠 있어도 그 인스턴스에서 방이 열린다 — 새 프로세스는 single-instance 락에 걸려
+바로 죽고 폴더 경로만 원본 프로세스로 넘어간다(`main.js`의 `second-instance`).
+
+CLI가 앱을 찾는 순서는 `CC_TALK_APP` → 설치본(`/Applications`, `%LOCALAPPDATA%\Programs`) →
+소스(`node_modules/electron`)다. 자동 탐색이 실패하면 경로를 직접 지정한다.
+
+```bash
+export CC_TALK_APP="/Applications/CC Talk.app"
+```
+
+## 패키징
+
+```bash
+npm run icon          # build/icon.png 재생성 (아이콘 수정했을 때만)
+npm run dist          # macOS dmg (arm64 + x64)
+npm run dist:win      # Windows 설치본 + 포터블 exe (x64)
+npm run dist:win:dir  # Windows 무압축 — dist/win-unpacked/CC Talk.exe
+```
+
+Windows 산출물은 `dist/`에 두 개가 나온다.
+
+- `CC-Talk-Setup-0.1.0.exe` — NSIS 설치 마법사(사용자 단위 설치, 경로 변경 가능, 바탕화면·시작 메뉴 바로가기)
+- `CC-Talk-0.1.0-portable.exe` — 설치 없이 그대로 실행하는 단일 exe
+
+mac에서도 wine 없이 그대로 빌드된다(electron-builder 26 기준). 코드 서명은 안 붙으므로 Windows에서
+처음 실행할 때 SmartScreen 경고가 뜬다 — "추가 정보 → 실행"으로 넘어가면 된다.
+
+### Windows 실행 조건
+
+Claude Code CLI가 설치돼 있어야 한다 (`npm i -g @anthropic-ai/claude-code`). 앱이 `cmd.exe`로 띄운다.
+
+PATH에 없어도 아래 위치는 앱이 알아서 뒤진다 — Explorer로 띄운 GUI 앱은 **로그인 시점의 PATH**를
+물려받아서, CLI를 방금 설치했으면 PATH에 아직 안 잡혀 있기 때문이다.
+
+```
+%USERPROFILE%\.local\bin        네이티브 설치본
+%APPDATA%\npm                   npm -g
+%LOCALAPPDATA%\Programs\claude
+%USERPROFILE%\AppData\Local\Volta\bin
+%USERPROFILE%\scoop\shims
+```
+
+그래도 못 찾으면 시작할 때 안내 다이얼로그를 띄우고, 방을 열면 시스템 메시지로 설치 방법을 알려준다.
+
+## 플랫폼 분기
+
+OS별로 갈리는 부분은 전부 `lib/platform.js` 한 곳에 모아뒀다.
+
+- **셸** — mac은 `zsh -ilc`(fnm/nvm PATH 로딩 때문), Windows는 `cmd.exe`.
+  인용 처리는 Node의 `shell: true` 구현에 맡긴다
+- **홈 경로** — `os.homedir()`. Windows엔 `$HOME`이 없다 (`USERPROFILE`)
+- **자식 env** — `claudeEnv()`가 `CLAUDE*` 제거 + Windows PATH 보강을 함께 처리.
+  `{...process.env}`로 복사하면 Windows env의 대소문자 무시 성질이 사라져 `Path`/`PATH`가
+  갈리므로 하나로 합친다
+- **창 크롬** — mac은 `hiddenInset`(왼쪽 신호등), Windows는 `titleBarOverlay`(오른쪽 네이티브 버튼).
+  Windows에서 `hiddenInset`은 무시돼 닫기 버튼이 통째로 사라지므로 반드시 분기해야 한다.
+  헤더 여백은 `body.win` / `body.mac` 클래스로 CSS에서 맞춘다
+- **알림** — Windows 토스트는 `setAppUserModelId`가 설치본 appId와 맞아야 뜬다
+- **중복 실행** — 포터블 exe는 더블클릭으로 쉽게 두 번 뜬다. `requestSingleInstanceLock`으로
+  막지 않으면 두 프로세스가 `rooms.json`을 같이 쓰다 깨진다
+
 ## 구조 (v2 — 헤드리스 엔진)
 
 - **메인 창** = 방 목록 (카톡 메인처럼 좁은 세로 창). 방 클릭 → 전용 채팅 창이 별도로 열림
