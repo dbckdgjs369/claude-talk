@@ -16,7 +16,13 @@
   "build": {
     "appId": "com.dbckdgjs369.cctalk",
     "productName": "CC Talk",
-    "files": ["main.js", "bin/**", "lib/**", "renderer/**", "package.json"],
+    "files": [
+      "main.js",
+      "bin/**",
+      "lib/**",
+      "renderer/**",
+      "package.json"
+    ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "target": "dmg",
@@ -31,8 +37,18 @@
     "win": {
       "icon": "build/icon.png",
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ]
     },
     "nsis": {
@@ -54,6 +70,7 @@
   },
   "dependencies": {
     "dompurify": "^3.4.13",
-    "markdown-it": "^15.0.0"
+    "markdown-it": "^15.0.0",
+    "qrcode": "^1.5.4"
   }
 }

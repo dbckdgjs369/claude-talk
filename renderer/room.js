@@ -83,7 +83,25 @@ function updateStatusbar() {
   if (model) parts.push(model);
   if (quota?.session != null) parts.push(`5h: ${quota.session}%`);
   if (quota?.week != null) parts.push(`7d: ${quota.week}%`);
-  document.getElementById('statusbar').textContent = parts.join(' | ') || 'Claude Code';
+
+  const bar = document.getElementById('statusbar');
+  bar.textContent = parts.join(' | ') || 'Claude Code';
+
+  // 컨텍스트 크기는 따로 붙인다 — 턴마다 이만큼을 다시 읽으므로 방이 무거워지는 걸
+  // 눈으로 보고 새 방으로 옮길지 판단할 수 있어야 한다
+  const ctx = lastRoomSummary?.context || 0;
+  if (!ctx) return;
+  const el = document.createElement('span');
+  el.className = 'ctx-size';
+  const limit = lastRoomSummary?.contextLimit || 0;
+  const ratio = limit ? ctx / limit : 0;
+  if (ratio >= 0.8) el.classList.add('danger'); // 곧 자동 압축
+  else if (ctx >= 200000) el.classList.add('warn'); // 턴당 비용이 눈에 띄게 커지는 구간
+  el.textContent = ` | 컨텍스트 ${ctx >= 10000 ? Math.round(ctx / 1000) + 'k' : ctx}`;
+  el.title = limit
+    ? `이 방의 현재 대화 크기 ${ctx.toLocaleString()} 토큰 (한도의 ${Math.round(ratio * 100)}%)\n한 번 주고받을 때마다 이만큼을 다시 읽습니다`
+    : `이 방의 현재 대화 크기 ${ctx.toLocaleString()} 토큰`;
+  bar.appendChild(el);
 }
 
 ipcRenderer.on('room:quota', (e, q) => {
@@ -545,6 +563,52 @@ pickerEl.addEventListener('click', (e) => {
   if (e.target === pickerEl) pickerEl.classList.add('hidden');
 });
 
+// ---------- 폰에서 사진 넣기 (QR) ----------
+const qrModalEl = document.getElementById('qr-modal');
+let qrToken = null;
+
+async function openQr() {
+  const res = await ipcRenderer.invoke('room:uploadUrl', roomId);
+  if (!res) return;
+  const body = document.getElementById('qr-body');
+  if (res.error) {
+    body.innerHTML = '';
+    const p = document.createElement('div');
+    p.id = 'qr-hint';
+    p.textContent = res.error;
+    body.appendChild(p);
+  } else {
+    qrToken = res.token;
+    document.getElementById('qr-img').src = res.qr;
+    document.getElementById('qr-url').textContent = res.url;
+  }
+  qrModalEl.classList.remove('hidden');
+}
+
+function closeQr() {
+  qrModalEl.classList.add('hidden');
+  // 창을 닫으면 주소를 무효화한다 — 같은 Wi-Fi의 다른 기기가 계속 쓸 수 있으면 안 된다
+  if (qrToken) ipcRenderer.invoke('room:uploadDone', qrToken);
+  qrToken = null;
+}
+
+document.getElementById('btn-phone').onclick = openQr;
+qrModalEl.addEventListener('click', (e) => {
+  if (e.target === qrModalEl) closeQr();
+});
+
+// 폰에서 사진이 도착 — 첨부칸에 꽂고, 캡션이 있으면 입력창에 채운다
+ipcRenderer.on('room:photo', (e, photo) => {
+  pendingImages.push({ name: photo.name, mediaType: photo.mediaType, base64: photo.base64 });
+  renderAttachBar();
+  if (photo.caption) {
+    inputEl.value = inputEl.value ? inputEl.value + ' ' + photo.caption : photo.caption;
+    autoGrow();
+  }
+  closeQr();
+  inputEl.focus();
+});
+
 // ---------- 권한 모드 픽커 ----------
 // 기본값은 따로 두지 않는다 — settings.json의 전역 설정을 따르고, 여기서 고르면 그 방만 덮어쓴다.
 // 세션이 떠 있으면 control_request로 즉시 반영되고, 꺼져 있으면 다음 기동 때 인자로 들어간다.
@@ -739,6 +803,8 @@ window.addEventListener('keydown', (e) => {
     e.preventDefault();
     if (!pickerEl.classList.contains('hidden')) {
       pickerEl.classList.add('hidden');
+    } else if (!qrModalEl.classList.contains('hidden')) {
+      closeQr();
     } else if (!permPickerEl.classList.contains('hidden')) {
       permPickerEl.classList.add('hidden');
     } else if (!slashMenuEl.classList.contains('hidden')) {

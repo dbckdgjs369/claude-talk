@@ -19,6 +19,8 @@ const fs = require('fs');
 const { scanPastSessions, deleteSessionFile, titleForFile, tailInfoForFile, renameSession, normalizeSdkMarkers } = require('./lib/sessions-index');
 const { sessionFileFor, parseFileSync } = require('./lib/transcript');
 const { taskSummary, foldTaskOps } = require('./lib/tasks');
+const { UploadServer } = require('./lib/upload-server');
+const QRCode = require('qrcode');
 
 let mainWin = null;
 let store = null;
@@ -65,6 +67,9 @@ function roomSummary(room) {
     preview: room.lastPreview || '',
     time: room.lastTime || null,
     unread: unread.get(room.id) || 0,
+    // 이 방이 얼마나 무거운지 — 턴마다 이만큼을 통째로 다시 읽으므로 방을 새로 팔 판단 근거가 된다
+    context: s?.contextTokens || 0,
+    contextLimit: s?._contextLimit?.() || 0,
     // 분기 방이면 목록에서 원본을 알 수 있게 (원본이 삭제됐으면 이름은 비어 있다)
     forkedFrom: room.forkedFrom || null,
     forkedFromName: room.forkedFrom ? store.get(room.forkedFrom)?.aiTitle || store.get(room.forkedFrom)?.name || null : null,
@@ -81,6 +86,17 @@ function broadcast(room) {
 function roomWinFocused(roomId) {
   const w = roomWins.get(roomId);
   return !!w && !w.isDestroyed() && w.isFocused();
+}
+
+// Dock 아이콘에 안읽음 합계를 띄운다 (카톡처럼). 앱을 보고 있지 않아도 몇 개 쌓였는지 보이게.
+// setBadgeCount는 macOS·Linux만 지원하므로 Windows에서는 조용히 넘긴다.
+function refreshBadge() {
+  if (!isMac) return;
+  let total = 0;
+  for (const n of unread.values()) total += n;
+  try {
+    app.setBadgeCount(total); // 0이면 뱃지가 사라진다
+  } catch {}
 }
 
 // 발송한 알림을 붙잡아 둔다. 지역 변수로 두면 show() 직후 참조가 사라져 GC 대상이 되고,
@@ -191,6 +207,7 @@ function ensureSession(room) {
     store.save();
     if (msg.role !== 'user' && !roomWinFocused(room.id)) {
       unread.set(room.id, (unread.get(room.id) || 0) + 1);
+      refreshBadge();
     }
     const w = roomWins.get(room.id);
     if (w && !w.isDestroyed()) w.webContents.send('room:message', msg);
@@ -389,6 +406,7 @@ function openRoomWindow(roomId) {
   trackBounds(w, (b) => (winState.rooms[roomId] = b));
   w.on('focus', () => {
     unread.set(roomId, 0);
+    refreshBadge();
     broadcast(room);
   });
   w.on('closed', () => roomWins.delete(roomId));
@@ -734,6 +752,7 @@ ipcMain.handle('rooms:delete', (e, id) => {
   if (s) s.kill();
   sessions.delete(id);
   unread.delete(id);
+  refreshBadge();
   const w = roomWins.get(id);
   if (w && !w.isDestroyed()) w.close();
   // 그 방의 대화 기록 파일도 완전 삭제 (1 파일 = 1 방)
@@ -750,6 +769,7 @@ ipcMain.handle('room:init', (e, id) => {
   const room = store.get(id);
   if (!room) return null;
   unread.set(id, 0);
+  refreshBadge();
   const s = ensureSession(room);
   const messages = s.history();
   broadcast(room);
@@ -778,6 +798,33 @@ ipcMain.handle('room:kill', (e, id) => {
   const s = sessions.get(id);
   if (s) s.kill();
 });
+
+// ---------- 폰에서 사진 넣기 (같은 Wi-Fi, QR) ----------
+
+const uploader = new UploadServer();
+uploader.onPhoto = (roomId, photo) => {
+  const w = roomWins.get(roomId);
+  if (!w || w.isDestroyed()) return;
+  w.webContents.send('room:photo', photo);
+  w.show(); // 폰에서 보냈으면 맥 화면에서 바로 보이는 게 자연스럽다
+};
+
+ipcMain.handle('room:uploadUrl', async (e, id) => {
+  if (!store.get(id)) return null;
+  try {
+    await uploader.start();
+    const token = uploader.issue(id);
+    const url = uploader.urlFor(token);
+    if (!url) return { error: 'Wi-Fi에 연결돼 있지 않아요. 같은 네트워크가 필요합니다.' };
+    return { url, token, qr: await QRCode.toDataURL(url, { margin: 1, width: 260 }) };
+  } catch (err) {
+    return { error: `업로드 서버를 열 수 없어요 (${err.code || err.message})` };
+  }
+});
+
+ipcMain.handle('room:uploadDone', (e, token) => uploader.revoke(token));
+
+app.on('quit', () => uploader.stop());
 
 const PERMISSION_MODES = ['bypassPermissions', 'acceptEdits', 'plan'];
 

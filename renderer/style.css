@@ -12,6 +12,16 @@
   --code-bg: rgba(0, 0, 0, .35);
   --link: #8ab4f8;
 
+  /* 말풍선 안(마크다운) 전용 값.
+     --border/--code-bg는 앱 배경(#17181c)에 맞춰진 값이라, 그보다 밝은 말풍선(#2f3136)
+     위에서는 대비가 1.06:1까지 떨어져 표 테두리가 아예 안 보였다.
+     코드는 더 어둡게, 테두리는 더 밝게 — 양방향으로 벌려 분리감을 만든다. */
+  --md-code-bg: #14161a;
+  --md-code-fg: #f2cf93;
+  --md-border: #6b707c; /* 비텍스트 대비 3:1 목표 — 표 테두리가 실제로 보여야 한다 */
+  --md-th-bg: #474c56;
+  --md-row-bg: #3a3e45;
+
   --bg-sidebar: var(--bg-deep);
   --bg-chat: #1e1f22;
   --bg-header: var(--bg-elev);
@@ -35,6 +45,13 @@ body.light {
   --neutral: #d6dae0;
   --code-bg: rgba(0, 0, 0, .07);
   --link: #3b6dd8;
+
+  /* 라이트 테마의 말풍선은 흰색이라 반대로 코드를 옅은 회색으로 띄운다 */
+  --md-code-bg: #eceef3;
+  --md-code-fg: #8f3f16;
+  --md-border: #9aa1b0;
+  --md-th-bg: #dfe4ec;
+  --md-row-bg: #f1f3f7;
 
   --bg-sidebar: #ffffff;
   --bg-chat: #bacee0;
@@ -234,6 +251,11 @@ body.room-window { background: var(--bg-chat); }
   color: var(--fg);
 }
 .header-actions button:hover { background: var(--hover); }
+
+/* 컨텍스트 크기 — 평소엔 조용히, 무거워지면 눈에 띄게 */
+.ctx-size { color: var(--fg-dim); }
+.ctx-size.warn { color: var(--accent); }
+.ctx-size.danger { color: var(--badge); font-weight: 700; }
 
 /* ---------- 분기 방: 물려받은 대화 ---------- */
 .inherited-toggle {
@@ -443,22 +465,33 @@ mark.search-hit.current { background: var(--accent); color: #1a1a1a; }
 .md h1:first-child, .md h2:first-child, .md h3:first-child { margin-top: 0; }
 .md ul, .md ol { margin: 0 0 8px; padding-left: 20px; }
 .md li { margin: 2px 0; }
+/* 인라인 코드: 배경만으론 안 보여서 테두리와 글자색까지 함께 준다 */
 .md code {
   font-family: Menlo, monospace;
   font-size: 12px;
-  background: var(--code-bg);
+  background: var(--md-code-bg);
+  color: var(--md-code-fg);
+  border: 1px solid var(--md-border);
   border-radius: 5px;
-  padding: 1px 5px;
+  padding: 0 5px;
 }
 .md pre {
-  background: var(--bg-deep2);
-  border: 1px solid var(--border);
+  background: var(--md-code-bg);
+  border: 1px solid var(--md-border);
   border-radius: 10px;
   padding: 10px 12px;
   margin: 8px 0;
   overflow-x: auto;
 }
-.md pre code { background: none; padding: 0; font-size: 12px; line-height: 1.55; }
+/* 코드블록 안에서는 테두리·색을 되돌린다 — 줄마다 상자가 생기면 더 지저분해진다 */
+.md pre code {
+  background: none;
+  border: none;
+  color: inherit;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
 .md a { color: var(--link); }
 .md blockquote {
   border-left: 3px solid var(--border);
@@ -467,9 +500,12 @@ mark.search-hit.current { background: var(--accent); color: #1a1a1a; }
   color: var(--fg-dim);
 }
 .md table { border-collapse: collapse; margin: 8px 0; font-size: 12.5px; display: block; overflow-x: auto; max-width: 100%; }
-.md th, .md td { border: 1px solid var(--border); padding: 5px 10px; }
-.md th { background: var(--active); }
-.md hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+.md th, .md td { border: 1px solid var(--md-border); padding: 5px 10px; }
+.md th { background: var(--md-th-bg); font-weight: 700; }
+/* 줄무늬 — 열이 많은 표에서 행을 따라 읽기 쉬워진다 */
+.md tbody tr:nth-child(even) td { background: var(--md-row-bg); }
+.md hr { border: none; border-top: 1px solid var(--md-border); margin: 10px 0; }
+.md blockquote { border-left: 3px solid var(--md-border); }
 .md img { max-width: 100%; border-radius: 8px; }
 .msg.user { align-self: flex-end; }
 .msg.user .bubble { background: var(--bg-bubble-me); color: #1a1a1a; border-top-right-radius: 4px; }
@@ -759,7 +795,15 @@ body.viewer-window {
 
 /* ---------- 모델 픽커 ---------- */
 /* 권한 픽커는 모델 픽커와 생김새를 공유한다 (.picker-card / .model-item 재사용) */
+#qr-modal { z-index: 91; }
+#qr-body { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 4px 0 2px; }
+/* QR은 흰 배경이어야 카메라가 잘 읽는다 — 다크 테마에서도 흰 판을 깔아준다 */
+#qr-img { width: 220px; height: 220px; background: #fff; border-radius: 10px; padding: 6px; }
+#qr-url { font-size: 10.5px; color: var(--fg-dim); word-break: break-all; text-align: center; }
+#qr-hint { font-size: 12px; color: var(--fg-dim); text-align: center; }
+
 #model-picker,
+#qr-modal,
 #perm-picker {
   position: fixed;
   inset: 0;
