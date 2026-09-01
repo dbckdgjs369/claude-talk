@@ -1,5 +1,6 @@
 const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
 const path = require('path');
+const os = require('os');
 const crypto = require('crypto');
 const readline = require('readline');
 const {
@@ -70,6 +71,8 @@ function roomSummary(room) {
     // 이 방이 얼마나 무거운지 — 턴마다 이만큼을 통째로 다시 읽으므로 방을 새로 팔 판단 근거가 된다
     context: s?.contextTokens || 0,
     contextLimit: s?._contextLimit?.() || 0,
+    // 자동 압축이 걸리는 지점 — 상태줄 경고 색을 모델 한도가 아니라 이 값 기준으로 매긴다
+    compactAt: s?._compactAt?.() || 0,
     // 분기 방이면 목록에서 원본을 알 수 있게 (원본이 삭제됐으면 이름은 비어 있다)
     forkedFrom: room.forkedFrom || null,
     forkedFromName: room.forkedFrom ? store.get(room.forkedFrom)?.aiTitle || store.get(room.forkedFrom)?.name || null : null,
@@ -133,10 +136,14 @@ function ensureSession(room) {
 
   s.on('state', (st) => {
     broadcast(room);
-    // 세션 종료 시 sdk 마킹 정규화 → 터미널 claude --resume 픽커에도 보이게
-    if (st === 'offline' && room.sessionId) {
+    // 세션 종료 시 sdk 마킹 정규화 → 터미널 claude --resume 픽커에도 보이게.
+    // 정리할 게 없어도 파일을 통째로 읽는다(이 방은 8.5MB). 유휴 종료가 생기면서 offline
+    // 전환이 잦아졌으므로, 마커가 없다고 확인된 파일은 다시 켜질 때까지 건너뛴다.
+    if (st === 'offline' && room.sessionId && !s._markersClean) {
       normalizeSdkMarkers(sessionFileFor(room.dir, room.sessionId));
+      s._markersClean = true; // 돌린 직후엔 마커가 없다 (다시 켜지면 아래에서 해제)
     }
+    if (st === 'starting') s._markersClean = false; // 새 턴이 돌면 sdk 마커가 다시 붙는다
   });
   s.on('session-id', (sid) => {
     // 분기가 확정되면 forkFrom은 역할이 끝난다 (다음 기동은 자기 세션을 resume)
@@ -262,6 +269,9 @@ function cleanProbeSessions() {
 }
 
 function refreshQuota() {
+  // 프로브는 claude를 통째로 띄우고 그때마다 MCP 서버까지 딸려 올라온다. 표시할 창이
+  // 없으면 그 비용을 낼 이유가 없다 — 창을 열 때 room:init이 최신 값을 다시 받아간다.
+  if (!anyWindowVisible()) return;
   const probeDir = quotaProbeDir();
   fs.mkdirSync(probeDir, { recursive: true });
   const env = claudeEnv();
@@ -372,7 +382,39 @@ function createMainWindow() {
   });
 }
 
+// 창을 닫아도 claude 자식 프로세스는 그대로 남아 있었다. 큰 방 하나가 500~700MB를 잡고,
+// 방을 여러 개 열어두면 그게 누적돼 발열·메모리로 돌아온다. 세션 객체는 그대로 두고
+// (컨텍스트·할 일·히스토리 유지) 프로세스만 내린다 — 다시 열면 --resume으로 이어진다.
+const IDLE_KILL_MS = 5 * 60 * 1000;
+const idleKillTimers = new Map();
+
+function cancelIdleKill(roomId) {
+  const t = idleKillTimers.get(roomId);
+  if (t) {
+    clearTimeout(t);
+    idleKillTimers.delete(roomId);
+  }
+}
+
+function scheduleIdleKill(roomId) {
+  cancelIdleKill(roomId);
+  const t = setTimeout(() => {
+    idleKillTimers.delete(roomId);
+    // 그새 다시 열었으면 그만둔다. 숨김도 대상이므로 존재 여부가 아니라 보이는지로 판단한다.
+    const w = roomWins.get(roomId);
+    if (w && !w.isDestroyed() && w.isVisible()) return;
+    const s = sessions.get(roomId);
+    if (!s || !s.child) return;
+    // 창을 닫아도 턴은 계속 돌 수 있다 (알림으로 완료를 받는 사용 방식). 끝날 때까지 미룬다.
+    if (s.state === 'working' || s.state === 'starting') return scheduleIdleKill(roomId);
+    s.kill();
+  }, IDLE_KILL_MS);
+  t.unref?.();
+  idleKillTimers.set(roomId, t);
+}
+
 function openRoomWindow(roomId) {
+  cancelIdleKill(roomId);
   const existing = roomWins.get(roomId);
   if (existing && !existing.isDestroyed()) {
     if (existing.isMinimized()) existing.restore(); // 최소화 상태면 show()만으론 안 올라온다
@@ -405,22 +447,81 @@ function openRoomWindow(roomId) {
   w.loadFile(path.join(__dirname, 'renderer', 'room.html'), { query: { id: roomId } });
   trackBounds(w, (b) => (winState.rooms[roomId] = b));
   w.on('focus', () => {
+    cancelIdleKill(roomId);
     unread.set(roomId, 0);
     refreshBadge();
     broadcast(room);
   });
-  w.on('closed', () => roomWins.delete(roomId));
+  w.on('show', () => cancelIdleKill(roomId));
+  w.on('closed', () => {
+    roomWins.delete(roomId);
+    scheduleIdleKill(roomId);
+  });
+}
+
+// 방이 될 수 없는 위치인가.
+//
+// 20초 스캐너는 ~/.claude/projects 아래 전부를 방으로 합류시킨다. 그래서 임시 폴더에서
+// claude를 잠깐 돌리기만 해도(디버깅·프로브·테스트) 목록에 쓰레기 방이 남았다. 예전엔
+// 쿼터 프로브 디렉토리 하나만 걸렀는데, 임시 폴더 전반을 걸러야 같은 일이 안 반복된다.
+function transientRoots() {
+  if (transientRoots._cache) return transientRoots._cache;
+  const roots = [quotaProbeDir(), app.getPath('userData'), os.tmpdir(), '/tmp', '/private/tmp'];
+  const out = new Set();
+  for (const r of roots) {
+    if (!r) continue;
+    out.add(path.resolve(r));
+    // macOS의 /tmp는 /private/tmp 심볼릭 링크다 — 양쪽 표기를 다 담아야 걸러진다
+    try {
+      out.add(fs.realpathSync(r));
+    } catch {}
+  }
+  return (transientRoots._cache = [...out]);
+}
+
+function isTransientDir(dir) {
+  if (!dir) return true;
+  const d = path.resolve(dir);
+  return transientRoots().some((root) => d === root || d.startsWith(root + path.sep));
+}
+
+// 필터가 생기기 전에 이미 합류해 버린 임시 폴더 방들을 시작할 때 한 번 걷어낸다.
+//
+// 방을 지우는 건 되돌릴 수 없으니 조건을 좁게 잡는다: 임시 폴더 안이면서, 그 폴더가 이미
+// 사라진 것만. 둘 다 만족하면 사용자가 만든 방일 수 없다. 대화 기록 파일은 건드리지 않고
+// 목록에서만 뺀다 — 판단이 틀렸더라도 원본은 남아 다시 합류시킬 수 있다.
+function pruneTransientRooms() {
+  const junk = store.rooms.filter((r) => isTransientDir(r.dir) && !fs.existsSync(r.dir));
+  if (!junk.length) return 0;
+  const ids = new Set(junk.map((r) => r.id));
+  store.rooms = store.rooms.filter((r) => !ids.has(r.id));
+  for (const r of junk) {
+    sessions.get(r.id)?.kill();
+    sessions.delete(r.id);
+    unread.delete(r.id);
+    delete winState.rooms[r.id];
+    if (mainWin && !mainWin.isDestroyed()) mainWin.webContents.send('room:removed', r.id);
+    console.log('[cc-talk] 임시 폴더 방 정리:', r.aiTitle || r.name, '—', r.dir);
+  }
+  store.save();
+  refreshBadge();
+  return junk.length;
 }
 
 // 과거 세션(터미널에서 하던 대화 포함)을 방으로 합류 — 삭제(무시)했거나 이미 있는 건 제외
 function importPastSessions() {
+  if (!anyWindowVisible()) return; // 새 방을 합류시켜도 볼 사람이 없다 — 창을 열 때 따라잡는다
   const exclude = new Set([
     ...store.rooms.map((r) => r.sessionId).filter(Boolean),
     ...store.ignoredSessions,
   ]);
-  const found = scanPastSessions({ excludeSessionIds: exclude }).filter(
-    (sess) => sess.dir !== quotaProbeDir() // 쿼터 프로브 세션은 방이 아님
-  );
+  const found = scanPastSessions({ excludeSessionIds: exclude }).filter((sess) => {
+    if (isTransientDir(sess.dir)) return false;
+    // 폴더가 이미 없는 세션을 새로 방으로 만들면 열자마자 "폴더를 찾을 수 없습니다"인 방이
+    // 된다. 기존 방은 건드리지 않는다 — 외장 디스크처럼 잠깐 빠졌을 수 있다.
+    if (!fs.existsSync(sess.dir)) return false;
+    return true;
+  });
   for (const sess of found) {
     const room = {
       id: crypto.randomUUID(),
@@ -456,7 +557,16 @@ function refreshTitles() {
 // 터미널에서 이어간 대화도 목록에 실시간 반영: 방 파일의 mtime을 폴링해
 // 변하면 미리보기·시간·제목 갱신 (앱 엔진이 살아있는 방은 엔진 이벤트가 담당)
 const fileMtimes = new Map(); // roomId → mtimeMs
+// 보이는 창이 하나도 없으면 아무도 결과를 못 본다 — 그 동안 4초마다 65개 방을 stat하고
+// 8MB짜리 세션 파일을 다시 파싱할 이유가 없다. 창을 다시 열면 그때 최신 상태로 그린다.
+function anyWindowVisible() {
+  if (mainWin && !mainWin.isDestroyed() && mainWin.isVisible()) return true;
+  for (const w of roomWins.values()) if (!w.isDestroyed() && w.isVisible()) return true;
+  return false;
+}
+
 function pollFileChanges() {
+  if (!anyWindowVisible()) return;
   for (const room of store.rooms) {
     if (!room.sessionId) continue;
     const fp = sessionFileFor(room.dir, room.sessionId);
@@ -607,6 +717,7 @@ app.whenReady().then(() => {
   }
   // 창 뜬 뒤 백그라운드로 과거 세션 합류 + 기존 방 제목 갱신 + sdk 마킹 정규화
   setTimeout(() => {
+    pruneTransientRooms();
     importPastSessions();
     refreshTitles();
     for (const room of store.rooms) {
@@ -770,6 +881,8 @@ ipcMain.handle('room:init', (e, id) => {
   if (!room) return null;
   unread.set(id, 0);
   refreshBadge();
+  // 창이 다 닫혀 있는 동안엔 프로브를 안 돌린다 → 값이 낡았을 수 있으니 여기서 따라잡는다
+  if (!quota || Date.now() - quota.fetchedAt > 10 * 60 * 1000) setTimeout(refreshQuota, 0);
   const s = ensureSession(room);
   const messages = s.history();
   broadcast(room);
@@ -845,4 +958,7 @@ ipcMain.handle('room:interrupt', (e, id) => {
 ipcMain.handle('room:hide', (e, id) => {
   const w = roomWins.get(id);
   if (w && !w.isDestroyed()) w.hide();
+  // 숨긴 것도 치워둔 것과 같다 — 닫았을 때와 똑같이 유예 후 프로세스를 내린다.
+  // (다시 열면 openRoomWindow가 취소한다)
+  scheduleIdleKill(id);
 });

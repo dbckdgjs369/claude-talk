@@ -93,14 +93,18 @@ function updateStatusbar() {
   if (!ctx) return;
   const el = document.createElement('span');
   el.className = 'ctx-size';
+  // 경고 기준은 모델 한도가 아니라 "자동 압축이 걸리는 지점"이다. 한도가 1M이어도
+  // 비용은 컨텍스트 크기에 그대로 비례하므로, 한도 대비 %는 비싼 방을 안 비싸 보이게 만든다.
   const limit = lastRoomSummary?.contextLimit || 0;
-  const ratio = limit ? ctx / limit : 0;
-  if (ratio >= 0.8) el.classList.add('danger'); // 곧 자동 압축
-  else if (ctx >= 200000) el.classList.add('warn'); // 턴당 비용이 눈에 띄게 커지는 구간
+  const compactAt = lastRoomSummary?.compactAt || 0;
+  if (compactAt && ctx >= compactAt * 0.9) el.classList.add('danger'); // 곧 자동 압축
+  else if (ctx >= 100000) el.classList.add('warn'); // 턴당 비용이 눈에 띄게 커지는 구간
   el.textContent = ` | 컨텍스트 ${ctx >= 10000 ? Math.round(ctx / 1000) + 'k' : ctx}`;
-  el.title = limit
-    ? `이 방의 현재 대화 크기 ${ctx.toLocaleString()} 토큰 (한도의 ${Math.round(ratio * 100)}%)\n한 번 주고받을 때마다 이만큼을 다시 읽습니다`
-    : `이 방의 현재 대화 크기 ${ctx.toLocaleString()} 토큰`;
+  el.title =
+    `이 방의 현재 대화 크기 ${ctx.toLocaleString()} 토큰\n` +
+    `한 번 주고받을 때마다 이만큼을 다시 읽습니다 (도구 호출 하나당 1회)\n` +
+    (compactAt ? `${compactAt.toLocaleString()} 토큰을 넘으면 자동으로 압축합니다` : '') +
+    (limit ? ` · 모델 한도 ${limit.toLocaleString()}` : '');
   bar.appendChild(el);
 }
 
@@ -395,17 +399,28 @@ function statusText() {
   return sec !== null && sec > 0 ? `${label} · ${sec}초` : label;
 }
 
+// 인디케이터는 세션이 도는 내내 떠 있고 1초마다 갱신된다. textContent로 통째로 갈아끼우면
+// 점 세 개까지 매번 새로 만들어져 애니메이션이 끊기므로, 글자 부분만 따로 둔다.
+function setTypingText(el, text) {
+  const span = el.firstChild;
+  if (span.textContent !== text) span.textContent = text;
+}
+
 function updateTypingIndicator() {
   const existing = messagesEl.querySelector('.typing-indicator');
   const working = roomState === 'working' || roomState === 'starting';
   if (working && !existing) {
     const el = document.createElement('div');
     el.className = 'typing-indicator';
-    el.textContent = statusText();
+    el.appendChild(document.createTextNode(statusText()));
+    const dots = document.createElement('span');
+    dots.className = 'typing-dots';
+    dots.innerHTML = '<i>.</i><i>.</i><i>.</i>';
+    el.appendChild(dots);
     messagesEl.appendChild(el);
     scrollToBottom();
   } else if (working && existing) {
-    existing.textContent = statusText();
+    setTypingText(existing, statusText());
   } else if (!working && existing) {
     existing.remove();
   }
@@ -413,7 +428,7 @@ function updateTypingIndicator() {
 
 setInterval(() => {
   const existing = messagesEl.querySelector('.typing-indicator');
-  if (existing) existing.textContent = statusText();
+  if (existing) setTypingText(existing, statusText());
 }, 1000);
 
 // ---------- 응답 스트리밍 (타이핑되듯 자라는 버블) ----------

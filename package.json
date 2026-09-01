@@ -9,6 +9,7 @@
   "scripts": {
     "start": "electron .",
     "icon": "node build/make-icon.js",
+    "link-cli": "node bin/install-cli.js",
     "dist": "electron-builder --mac --arm64 --x64",
     "dist:win": "electron-builder --win --x64",
     "dist:win:dir": "electron-builder --win dir --x64"

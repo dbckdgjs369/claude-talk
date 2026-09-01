@@ -695,6 +695,9 @@ body.viewer-window {
   color: var(--fg-dim);
   font-size: 12px;
   padding: 4px 8px;
+  /* 이 인디케이터는 세션이 도는 내내 애니메이션한다. contain이 없으면 그 재계산이
+     메시지 1,000개짜리 문서 전체로 번져 렌더러가 상시 10% CPU를 먹는다. */
+  contain: layout style;
 }
 
 /* 스트리밍 중인 버블: 끝에 깜빡이는 캐럿 */
@@ -704,12 +707,27 @@ body.viewer-window {
   animation: caret 1s infinite steps(2);
 }
 @keyframes caret { 50% { opacity: 0; } }
-.typing-indicator::after {
-  content: '...';
-  animation: dots 1.4s infinite steps(4);
+
+/* 점 세 개.
+   예전엔 ::after의 content를 애니메이션했는데(content: '' → '.' → '..' → '...'),
+   content 변경은 컴포지터가 아니라 레이아웃을 다시 돌린다. 자리를 미리 잡아두고
+   opacity만 흔들면 같은 모양이 레이아웃 0회로 나온다. */
+.typing-dots { display: inline-block; }
+.typing-dots i {
+  font-style: normal;
+  opacity: .25;
+  animation: dot 1.2s infinite;
 }
-@keyframes dots {
-  0% { content: ''; } 25% { content: '.'; } 50% { content: '..'; } 75% { content: '...'; }
+.typing-dots i:nth-child(2) { animation-delay: .2s; }
+.typing-dots i:nth-child(3) { animation-delay: .4s; }
+@keyframes dot {
+  0%, 60%, 100% { opacity: .25; }
+  30% { opacity: 1; }
+}
+/* 접근성 설정을 켠 사용자에겐 점을 고정 표시 */
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots i { animation: none; opacity: 1; }
+  .msg.streaming .bubble::after, .status-dot.working { animation: none; }
 }
 
 #composer {
