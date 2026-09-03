@@ -28,15 +28,16 @@
   </div>
   <div id="ctx-menu" class="hidden">
     <div class="ctx-item" data-action="rename">✏️ 이름 변경</div>
+    <div class="ctx-item" data-action="handle">🏷️ 호출명 변경</div>
     <div class="ctx-item" data-action="fork">🌿 여기서 분기</div>
     <div class="ctx-item danger" data-action="delete">🗑️ 삭제</div>
   </div>
 
   <div id="rename-modal" class="hidden">
     <div class="modal-card">
-      <div class="modal-title">방 이름 변경</div>
+      <div class="modal-title" id="rename-title">방 이름 변경</div>
       <input id="rename-input" type="text" maxlength="80" />
-      <div class="modal-sub">터미널 claude --resume 목록에도 반영돼요</div>
+      <div class="modal-sub" id="rename-sub">터미널 claude --resume 목록에도 반영돼요</div>
       <div class="modal-actions">
         <button id="rename-cancel">취소</button>
         <button id="rename-ok">변경</button>

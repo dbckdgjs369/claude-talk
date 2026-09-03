@@ -15,12 +15,16 @@ const {
   applyTitleBarTheme,
 } = require('./lib/platform');
 const { RoomsStore } = require('./lib/rooms-store');
-const { HeadlessSession } = require('./lib/engine');
+const { HeadlessSession, COMPACT_CHOICES, AUTO_COMPACT_AT } = require('./lib/engine');
 const fs = require('fs');
 const { scanPastSessions, deleteSessionFile, titleForFile, tailInfoForFile, renameSession, normalizeSdkMarkers } = require('./lib/sessions-index');
 const { sessionFileFor, parseFileSync } = require('./lib/transcript');
 const { taskSummary, foldTaskOps } = require('./lib/tasks');
 const { UploadServer } = require('./lib/upload-server');
+const {
+  slugify, uniqueHandle, findMentions, unknownMentions, relayRule,
+} = require('./lib/mentions');
+const { createRelay } = require('./lib/relay');
 const QRCode = require('qrcode');
 
 let mainWin = null;
@@ -62,6 +66,7 @@ function roomSummary(room) {
     name: room.name,
     title: room.aiTitle || room.name, // ai-title 우선, 폴더명 폴백
     sessionId: room.sessionId || null,
+    handle: room.handle || null, // @호출명 — 다른 방에서 이 방을 부를 때 쓴다
     state: s ? s.state : 'offline',
     activity: s?.activity || null,
     turnStart: s?.turnStartedAt || null,
@@ -71,8 +76,11 @@ function roomSummary(room) {
     // 이 방이 얼마나 무거운지 — 턴마다 이만큼을 통째로 다시 읽으므로 방을 새로 팔 판단 근거가 된다
     context: s?.contextTokens || 0,
     contextLimit: s?._contextLimit?.() || 0,
-    // 자동 압축이 걸리는 지점 — 상태줄 경고 색을 모델 한도가 아니라 이 값 기준으로 매긴다
-    compactAt: s?._compactAt?.() || 0,
+    // 자동 압축이 걸리는 지점 — 상태줄 경고 색을 모델 한도가 아니라 이 값 기준으로 매긴다.
+    // 방이 꺼져 있으면 모델을 몰라 한도로 깎을 수 없다 → 고른 값(없으면 기본)을 그대로 보여준다.
+    compactAt: s?._compactAt?.() || room.compactAt || AUTO_COMPACT_AT,
+    // 사용자가 직접 고른 값(안 골랐으면 null) — 픽커에서 "기본"과 구분해 체크 표시하는 데 쓴다
+    compactPick: room.compactAt || null,
     // 분기 방이면 목록에서 원본을 알 수 있게 (원본이 삭제됐으면 이름은 비어 있다)
     forkedFrom: room.forkedFrom || null,
     forkedFromName: room.forkedFrom ? store.get(room.forkedFrom)?.aiTitle || store.get(room.forkedFrom)?.name || null : null,
@@ -128,6 +136,73 @@ function notify(room, body) {
   n.show();
 }
 
+// ---------- 방 사이 말 전달 (@호출명) ----------
+//
+// 방은 그대로 "세션 하나 = 기록 파일 하나"다. 초대·멤버 개념은 없다. A방에서 "@프론트한테
+// 물어봐"라고 하면, A의 답변에서 @프론트로 시작하는 부분만 프론트 방의 stdin에 들어가
+// 그 방에 말풍선으로 남는다. 규칙과 봉투 형식은 lib/mentions.js.
+
+// 전달이 A→B→A→B로 끝없이 돌 수 있다. 사용자 발언 하나가 유발할 수 있는 전달 횟수를 묶는다.
+// (에이전트 루프는 호출당 컨텍스트 전량을 다시 읽으므로 방치하면 곧장 토큰 폭주다)
+const MAX_RELAY_HOPS = 6;
+
+function handleIndex() {
+  const m = new Map();
+  for (const r of store.rooms) if (r.handle) m.set(r.handle, r);
+  return m;
+}
+
+// 이 방을 부를 이름 후보들. 앞에 있는 것부터 쓴다.
+//
+// 폴더명이 1순위지만, 홈 폴더에서 그냥 `claude`를 친 세션이 많아 폴더명이 전부 사용자명으로
+// 겹친다. 그런 방까지 폴더명 + 번호로 밀면 @yoochangheon-37 같은 부를 수 없는 이름이 된다
+// → 겹치면 방 제목에서 뽑는다.
+function handleCandidates(room) {
+  const base = slugify(room.name);
+  const title = room.aiTitle ? slugify(room.aiTitle).split('-').slice(0, 3).join('-') : '';
+  const isHome = base === slugify(path.basename(homeDir()));
+  return [...(isHome ? [title] : []), base, title].filter(Boolean);
+}
+
+// 호출명이 없는 방에 하나씩 붙인다 (기존 방·새로 합류한 방 모두)
+function assignHandles() {
+  const taken = new Set(store.rooms.map((r) => r.handle).filter(Boolean));
+  let changed = false;
+  for (const room of store.rooms) {
+    if (room.handle) continue;
+    const cands = handleCandidates(room);
+    // 후보 중 안 겹치는 첫 번째, 다 겹치면 첫 후보에 번호를 단다
+    room.handle = cands.find((c) => !taken.has(c)) || uniqueHandle(cands[0] || 'room', taken);
+    taken.add(room.handle);
+    changed = true;
+  }
+  if (changed) store.save();
+  return changed;
+}
+
+function sysMessage(s, text) {
+  s.emit('message', { role: 'system', text, ts: new Date().toISOString() });
+}
+
+// 잘라낸 말을 상대 방에 넣는다. 그 방이 꺼져 있으면 --resume으로 알아서 깨어나고,
+// 무거우면 선압축이 먼저 걸린다 (engine.send의 기존 경로).
+function relayTo(target, fromHandle, body, hops) {
+  const s = ensureSession(target);
+  s._relayHops = hops;
+  s.send(body, [], { peerFrom: fromHandle });
+  // 카톡처럼 도착 즉시 알린다 — 그 방을 보고 있지 않으면 온 걸 알 방법이 없다
+  if (!roomWinFocused(target.id)) {
+    notify(target, `@${fromHandle} → ${truncate(plainify(body), 100)}`);
+  }
+}
+
+const handleRelays = createRelay({
+  maxHops: MAX_RELAY_HOPS,
+  handleIndex,
+  deliver: relayTo,
+  sysMessage,
+});
+
 function ensureSession(room) {
   let s = sessions.get(room.id);
   if (s) return s;
@@ -143,7 +218,14 @@ function ensureSession(room) {
       normalizeSdkMarkers(sessionFileFor(room.dir, room.sessionId));
       s._markersClean = true; // 돌린 직후엔 마커가 없다 (다시 켜지면 아래에서 해제)
     }
-    if (st === 'starting') s._markersClean = false; // 새 턴이 돌면 sdk 마커가 다시 붙는다
+    if (st === 'starting') {
+      s._markersClean = false; // 새 턴이 돌면 sdk 마커가 다시 붙는다
+      // 프로세스가 하나 늘었다 → 상한을 넘겼으면 가장 값싸게 내릴 수 있는 방을 내린다.
+      // 여기서 걸어야 하는 이유: spawn은 엔진이 send() 안에서 하므로 창을 안 열고 전달
+      // (@호출명)로만 깨어나는 방도 있다. 창 닫힘 경로에만 두면 그게 안 세어진다.
+      s._lastUsedAt = Date.now();
+      enforceLiveCap();
+    }
   });
   s.on('session-id', (sid) => {
     // 분기가 확정되면 forkFrom은 역할이 끝난다 (다음 기동은 자기 세션을 resume)
@@ -207,7 +289,8 @@ function ensureSession(room) {
     // lastPreview는 도구 실행 줄까지 포함하므로(목록에선 그게 유용하다) 알림에 그대로 쓰면
     // "작업 끝났다"는 알림에 🔧 Bash · cat > ... 같은 게 뜬다.
     if (msg.role === 'assistant' && msg.text) s.lastSay = truncate(plainify(msg.text), 120);
-    const prefix = msg.role === 'tool' ? '🔧 ' : msg.role === 'system' ? '⚠️ ' : '';
+    const prefix =
+      msg.role === 'tool' ? '🔧 ' : msg.role === 'system' ? '⚠️ ' : msg.role === 'peer' ? `@${msg.from} · ` : '';
     const imgTag = msg.images?.length ? `📷 사진${msg.images.length > 1 ? ` ${msg.images.length}장` : ''} ` : '';
     room.lastPreview = prefix + imgTag + truncate(msg.text, 60);
     room.lastTime = msg.ts;
@@ -219,6 +302,9 @@ function ensureSession(room) {
     const w = roomWins.get(room.id);
     if (w && !w.isDestroyed()) w.webContents.send('room:message', msg);
     broadcast(room);
+    // 답변에 @호출명이 있으면 그 부분을 상대 방으로 넘긴다. 말풍선을 먼저 보낸 뒤에
+    // 호출해야 "↗ 전달했어요" 줄이 그 아래에 붙는다.
+    if (msg.role === 'assistant' && msg.text) handleRelays(room, s, msg.text);
   });
   s.on('turn-end', () => {
     // 첫 턴들이 끝난 뒤 ai-title이 생겼을 수 있음 (생성이 비동기라 약간 늦게 확인)
@@ -385,7 +471,23 @@ function createMainWindow() {
 // 창을 닫아도 claude 자식 프로세스는 그대로 남아 있었다. 큰 방 하나가 500~700MB를 잡고,
 // 방을 여러 개 열어두면 그게 누적돼 발열·메모리로 돌아온다. 세션 객체는 그대로 두고
 // (컨텍스트·할 일·히스토리 유지) 프로세스만 내린다 — 다시 열면 --resume으로 이어진다.
-const IDLE_KILL_MS = 5 * 60 * 1000;
+//
+// 유예를 5분에서 2시간으로 늘렸다. 프로세스를 내리는 값이 생각보다 훨씬 컸기 때문이다:
+// resume은 대화 본문을 캐시에서 읽지 못하고 통째로 다시 쓴다. 실험(claude -p로 같은 세션을
+// 몇 초 간격으로 재개)에서 cache_read가 16,035에 고정된 채 나머지가 매번 cache_creation으로
+// 잡혔다 — 캐시에서 살아 오는 건 시스템 프롬프트뿐이다. 게다가 이 캐시는 1시간 TTL이라
+// 쓰기 값이 정가의 2배다. 즉 300k 방을 한 번 내리면 다음 메시지 하나가 600k를 문다.
+// 실측으로 이 재작성이 216회, 전체 입력 비용의 25%였다.
+//
+// 유예만 늘리면 메모리가 터지므로 개수 상한(MAX_LIVE_SESSIONS)으로 대신 묶는다.
+const IDLE_KILL_MS = 2 * 60 * 60 * 1000;
+
+// 유예가 끝났는데 턴이 도는 중이라 못 내린 경우 다시 확인하는 간격
+const IDLE_RECHECK_MS = 60 * 1000;
+
+// 동시에 살려둘 claude 프로세스 수. 실측 130~270MB(큰 방은 500~700MB)라 4개면 최대 1~2GB다.
+const MAX_LIVE_SESSIONS = 4;
+
 const idleKillTimers = new Map();
 
 function cancelIdleKill(roomId) {
@@ -396,25 +498,81 @@ function cancelIdleKill(roomId) {
   }
 }
 
-function scheduleIdleKill(roomId) {
+// 프로세스를 내려도 되는 방인가. 보이는 창이 있으면(=지금 쓰는 중) 안 되고, 턴이 도는 중이면
+// 안 된다 — 창을 닫아도 턴은 계속 돌고 사용자는 알림으로 완료를 받는 사용 방식이다.
+function killableSession(roomId) {
+  const w = roomWins.get(roomId);
+  if (w && !w.isDestroyed() && w.isVisible()) return false;
+  const s = sessions.get(roomId);
+  if (!s || !s.child) return false;
+  return s.state !== 'working' && s.state !== 'starting';
+}
+
+// 살아있는 프로세스를 MAX_LIVE_SESSIONS개로 묶는다.
+//
+// 어느 걸 내릴지는 "다시 깨울 때 물 값 ÷ 방치된 시간"으로 고른다. 깨우는 값은 컨텍스트에
+// 정비례하고(위 주석), 다시 올 확률은 최근에 썼는지에 달렸으니 — 크고 방금 쓴 방은 남기고
+// 작고 오래 안 쓴 방을 먼저 내린다. 단순 LRU로 하면 30k짜리를 살려두고 500k짜리를 내려
+// 정확히 반대로 움직인다.
+function enforceLiveCap() {
+  const live = [...sessions.entries()].filter(([, s]) => s.child);
+  let over = live.length - MAX_LIVE_SESSIONS;
+  if (over <= 0) return;
+  const now = Date.now();
+  const cands = live
+    .filter(([id]) => killableSession(id))
+    .map(([id, s]) => ({
+      id,
+      s,
+      // 컨텍스트를 아직 모르는 방(0)은 깨우는 값도 작으니 먼저 내려도 된다 → 1로 둔다
+      score: (s.contextTokens || 1) / Math.max(1, (now - (s._lastUsedAt || 0)) / 60000),
+    }))
+    .sort((a, b) => a.score - b.score);
+  for (const c of cands) {
+    if (over <= 0) break;
+    cancelIdleKill(c.id);
+    c.s.kill();
+    over--;
+  }
+}
+
+function scheduleIdleKill(roomId, delay = IDLE_KILL_MS) {
   cancelIdleKill(roomId);
+  // 치워둔 시점을 방치 시간의 기준으로 삼는다 (enforceLiveCap의 분모).
+  // 재시도(delay가 짧은 경우)에는 건드리지 않는다 — 그건 새로 쓴 게 아니다.
+  if (delay === IDLE_KILL_MS) {
+    const s0 = sessions.get(roomId);
+    if (s0) s0._lastUsedAt = Date.now();
+    // 이 방이 물러났으니 상한을 넘긴 게 있으면 지금 정리한다
+    enforceLiveCap();
+  }
   const t = setTimeout(() => {
     idleKillTimers.delete(roomId);
-    // 그새 다시 열었으면 그만둔다. 숨김도 대상이므로 존재 여부가 아니라 보이는지로 판단한다.
-    const w = roomWins.get(roomId);
-    if (w && !w.isDestroyed() && w.isVisible()) return;
-    const s = sessions.get(roomId);
-    if (!s || !s.child) return;
-    // 창을 닫아도 턴은 계속 돌 수 있다 (알림으로 완료를 받는 사용 방식). 끝날 때까지 미룬다.
-    if (s.state === 'working' || s.state === 'starting') return scheduleIdleKill(roomId);
-    s.kill();
-  }, IDLE_KILL_MS);
+    // 그새 다시 열었거나 턴이 도는 중이면 그만둔다. 숨김도 대상이므로 보이는지로 판단한다.
+    if (!killableSession(roomId)) {
+      const s = sessions.get(roomId);
+      // 턴이 도는 중이라 못 내린 경우만 다시 재운다. 유예를 처음부터 다시 주면 2시간을 더
+      // 기다리게 되므로 턴이 끝나는지만 짧게 확인한다. (창을 다시 연 경우는 열 때 취소된다)
+      if (s?.child && (s.state === 'working' || s.state === 'starting')) {
+        scheduleIdleKill(roomId, IDLE_RECHECK_MS);
+      }
+      return;
+    }
+    sessions.get(roomId).kill();
+  }, delay);
   t.unref?.();
   idleKillTimers.set(roomId, t);
 }
 
+// "지금 이 방을 썼다"고 표시. enforceLiveCap이 무엇을 내릴지 고를 때의 분모가 된다.
+function touchSession(roomId) {
+  const s = sessions.get(roomId);
+  if (s) s._lastUsedAt = Date.now();
+}
+
 function openRoomWindow(roomId) {
   cancelIdleKill(roomId);
+  touchSession(roomId);
   const existing = roomWins.get(roomId);
   if (existing && !existing.isDestroyed()) {
     if (existing.isMinimized()) existing.restore(); // 최소화 상태면 show()만으론 안 올라온다
@@ -448,6 +606,7 @@ function openRoomWindow(roomId) {
   trackBounds(w, (b) => (winState.rooms[roomId] = b));
   w.on('focus', () => {
     cancelIdleKill(roomId);
+    touchSession(roomId);
     unread.set(roomId, 0);
     refreshBadge();
     broadcast(room);
@@ -533,9 +692,15 @@ function importPastSessions() {
       lastTime: sess.time,
     };
     store.rooms.push(room);
-    broadcast(room);
   }
-  if (found.length) store.save();
+  if (found.length) {
+    assignHandles(); // 새로 합류한 방에도 @호출명을 붙인 뒤에 알린다
+    for (const sess of found) {
+      const room = store.rooms.find((r) => r.sessionId === sess.sessionId);
+      if (room) broadcast(room);
+    }
+    store.save();
+  }
   return found.length;
 }
 
@@ -699,6 +864,7 @@ app.whenReady().then(() => {
     store.rooms = store.rooms.filter((r) => r.dir !== quotaProbeDir());
     store.save();
   }
+  assignHandles(); // 목록이 그려지기 전에 @호출명을 채워둔다
   const seeded = store.rooms.find((r) => r.slashCommands?.length);
   if (seeded) globalSlashCommands = seeded.slashCommands;
   createMainWindow();
@@ -764,6 +930,7 @@ function createRoomForDir(dir) {
     lastPreview: '',
     lastTime: null,
   });
+  assignHandles();
   openRoomWindow(room.id);
   return room;
 }
@@ -800,6 +967,7 @@ ipcMain.handle('room:fork', (e, id) => {
     lastPreview: src.lastPreview,
     lastTime: new Date().toISOString(),
   });
+  assignHandles();
   openRoomWindow(room.id);
   return roomSummary(room);
 });
@@ -904,7 +1072,62 @@ ipcMain.handle('room:init', (e, id) => {
 ipcMain.handle('room:send', (e, id, text, images) => {
   const room = store.get(id);
   if (!room) return;
-  ensureSession(room).send(text, images || []);
+  const s = ensureSession(room);
+  // 사용자가 말을 걸면 전달 체인이 새로 시작된다 (홉 상한 리셋)
+  s._relayHops = 0;
+  s._lastUsedAt = Date.now(); // 창을 안 열고 보낼 수도 있다 — 여기서도 최근 사용으로 표시
+
+  // 사용자의 @프론트는 "프론트한테 물어봐"라고 이 방에 시키는 말이다 — 프론트로 전달되지
+  // 않는다. 대신 claude가 전달 방법을 알아야 하니 그 턴에만 규칙을 stdin에 덧붙인다.
+  const others = store.rooms.filter((r) => r.id !== room.id).map((r) => r.handle).filter(Boolean);
+  const mentioned = findMentions(text, others);
+  const opts = mentioned.length ? { wireSuffix: relayRule(mentioned) } : {};
+  s.send(text, images || [], opts);
+
+  // 오타를 조용히 삼키면 "보냈는데 안 갔다"가 된다. 내 말풍선 바로 아래에 알려준다.
+  if (!mentioned.length) {
+    const unknown = unknownMentions(text, others);
+    if (unknown.length) {
+      const list = others.slice(0, 12).map((h) => '@' + h).join(', ');
+      sysMessage(
+        s,
+        `@${unknown[0]} 이라는 방이 없어요.` + (list ? ` 쓸 수 있는 이름: ${list}${others.length > 12 ? ' …' : ''}` : '')
+      );
+    }
+  }
+});
+
+// 대기줄에서 아직 안 나간 말 취소. 방이 꺼져 있으면 대기줄도 없다(-1).
+ipcMain.handle('room:cancel-pending', (e, id, index, text) => {
+  const s = sessions.get(id);
+  return s ? s.cancelQueued(index, text) : -1;
+});
+
+// @자동완성용 방 목록 (자기 방은 제외)
+ipcMain.handle('rooms:handles', (e, exceptId) =>
+  store.rooms
+    .filter((r) => r.handle && r.id !== exceptId)
+    .map((r) => ({ handle: r.handle, title: r.aiTitle || r.name, name: r.name }))
+    .sort((a, b) => a.handle.localeCompare(b.handle))
+);
+
+// 말풍선의 이름표를 누르면 그 방을 연다
+ipcMain.handle('room:openByHandle', (e, handle) => {
+  const room = handleIndex().get(handle);
+  if (room) openRoomWindow(room.id);
+  return !!room;
+});
+
+ipcMain.handle('room:setHandle', (e, id, raw) => {
+  const room = store.get(id);
+  if (!room) return null;
+  const want = slugify(raw);
+  const taken = store.rooms.filter((r) => r.id !== id).map((r) => r.handle);
+  if (taken.includes(want)) return { error: `@${want} 는 이미 다른 방이 쓰고 있어요.` };
+  room.handle = want;
+  store.save();
+  broadcast(room);
+  return { handle: want };
 });
 
 ipcMain.handle('room:kill', (e, id) => {
@@ -947,6 +1170,18 @@ ipcMain.handle('room:setPermissionMode', (e, id, mode) => {
   ensureSession(room).setPermissionMode(mode);
   store.save();
   return mode;
+});
+
+// 방별 자동 압축 시점. null이면 기본값(AUTO_COMPACT_AT)으로 되돌린다.
+// 세션을 새로 띄우지 않는다 — 엔진이 매번 room.compactAt을 읽으므로 켜져 있는 방도 즉시 반영된다.
+ipcMain.handle('room:setCompactAt', (e, id, tokens) => {
+  const room = store.get(id);
+  if (!room) return null;
+  if (tokens !== null && !COMPACT_CHOICES.includes(tokens)) return null;
+  room.compactAt = tokens || undefined;
+  store.save();
+  broadcast(room); // 상태줄의 경고 색 기준이 바뀌므로 바로 다시 그린다
+  return room.compactAt || null;
 });
 
 ipcMain.handle('room:interrupt', (e, id) => {

@@ -168,6 +168,8 @@ ctxMenuEl.addEventListener('click', (e) => {
     }
   } else if (action === 'rename') {
     openRenameModal(ctxRoom);
+  } else if (action === 'handle') {
+    openHandleModal(ctxRoom);
   } else if (action === 'fork') {
     ipcRenderer.invoke('room:fork', ctxRoom.id).then((res) => {
       if (res?.error) alert(res.error);
@@ -177,16 +179,39 @@ ctxMenuEl.addEventListener('click', (e) => {
 
 // ---------- 이름 변경 모달 ----------
 
+// 방 이름과 호출명이 같은 모달을 쓴다 — 입력창 하나에 확인 버튼 하나로 끝나는 같은 모양이다.
 const renameModalEl = document.getElementById('rename-modal');
 const renameInputEl = document.getElementById('rename-input');
 let renameRoom = null;
+let renameMode = 'title'; // 'title' | 'handle'
 
-function openRenameModal(room) {
+function openModal(room, mode, { value, title, sub }) {
   renameRoom = room;
-  renameInputEl.value = room.title || room.name;
+  renameMode = mode;
+  document.getElementById('rename-title').textContent = title;
+  document.getElementById('rename-sub').textContent = sub;
+  renameInputEl.value = value;
   renameModalEl.classList.remove('hidden');
   renameInputEl.focus();
   renameInputEl.select();
+}
+
+function openRenameModal(room) {
+  openModal(room, 'title', {
+    value: room.title || room.name,
+    title: '방 이름 변경',
+    sub: '터미널 claude --resume 목록에도 반영돼요',
+  });
+}
+
+// 호출명 = 다른 방에서 이 방을 부를 이름(@호출명). 방 제목과 따로 두는 이유는
+// 제목은 AI가 지어 길고 바뀌는데 멘션은 짧고 안 변해야 하기 때문이다.
+function openHandleModal(room) {
+  openModal(room, 'handle', {
+    value: room.handle || '',
+    title: '호출명 변경',
+    sub: '다른 방에서 "@이름"으로 이 방을 부를 때 쓰는 이름이에요',
+  });
 }
 
 function closeRenameModal() {
@@ -195,9 +220,17 @@ function closeRenameModal() {
 }
 
 async function submitRename() {
-  const name = renameInputEl.value.trim();
-  if (name && renameRoom) {
-    await ipcRenderer.invoke('room:rename', renameRoom.id, name);
+  const value = renameInputEl.value.trim();
+  if (value && renameRoom) {
+    if (renameMode === 'handle') {
+      const res = await ipcRenderer.invoke('room:setHandle', renameRoom.id, value);
+      if (res?.error) {
+        alert(res.error);
+        return; // 모달을 열어둔다 — 다른 이름을 바로 넣을 수 있게
+      }
+    } else {
+      await ipcRenderer.invoke('room:rename', renameRoom.id, value);
+    }
   }
   closeRenameModal();
 }

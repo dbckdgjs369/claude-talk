@@ -104,7 +104,9 @@ function updateStatusbar() {
     `이 방의 현재 대화 크기 ${ctx.toLocaleString()} 토큰\n` +
     `한 번 주고받을 때마다 이만큼을 다시 읽습니다 (도구 호출 하나당 1회)\n` +
     (compactAt ? `${compactAt.toLocaleString()} 토큰을 넘으면 자동으로 압축합니다` : '') +
-    (limit ? ` · 모델 한도 ${limit.toLocaleString()}` : '');
+    (limit ? ` · 모델 한도 ${limit.toLocaleString()}` : '') +
+    `\n클릭하면 압축 시점을 바꿀 수 있어요`;
+  el.onclick = openCompactPicker; // 압축이 잦다고 느끼는 건 이 숫자를 볼 때다 — 여기서 바로 고치게
   bar.appendChild(el);
 }
 
@@ -335,6 +337,40 @@ function renderHistory(messages) {
   for (const m of messages.slice(inherited)) appendMessage(m, { scroll: false });
 }
 
+// ---------- 다른 방에서 온 말풍선 ----------
+// 내가 한 말도, 이 방 claude가 한 말도 아니다. 카톡 단톡방처럼 이름표를 얹어 구분하고
+// 호출명 해시로 색을 고정한다 (같은 방은 항상 같은 색).
+function peerHue(handle) {
+  let h = 0;
+  for (const ch of String(handle)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
+  return h % 360;
+}
+
+function appendPeerBubble(el, msg) {
+  const hue = peerHue(msg.from || '');
+  el.style.setProperty('--peer-hue', hue);
+
+  const col = document.createElement('div');
+  col.className = 'peer-col';
+
+  const name = document.createElement('button');
+  name.className = 'peer-name';
+  name.textContent = '@' + (msg.from || '?');
+  name.title = `${msg.from} 방 열기`;
+  name.onclick = () => ipcRenderer.invoke('room:openByHandle', msg.from);
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble md';
+  bubble.innerHTML = renderMarkdown(msg.text || '');
+
+  col.append(name, bubble);
+
+  const time = document.createElement('div');
+  time.className = 'time-label';
+  time.textContent = fmtTime(msg.ts);
+  el.append(col, time);
+}
+
 function appendMessage(msg, { scroll = true, into = null } = {}) {
   // 대기줄 메시지는 대화 흐름이 아니라 입력창 위 고정 영역에
   if (msg.pending) {
@@ -351,7 +387,9 @@ function appendMessage(msg, { scroll = true, into = null } = {}) {
 
   const el = document.createElement('div');
   el.className = 'msg ' + msg.role;
-  if (msg.role === 'tool') {
+  if (msg.role === 'peer') {
+    appendPeerBubble(el, msg);
+  } else if (msg.role === 'tool') {
     el.textContent = '🔧 ' + msg.text;
     el.onclick = () => el.classList.toggle('expanded'); // 클릭 = 전체 보기 토글
   } else if (msg.role === 'system') {
@@ -474,8 +512,10 @@ function renderHeader(room) {
   document.title = title;
   document.getElementById('chat-title').textContent = title;
   const model = shortModelName(roomInfo.model);
+  // 이 방의 호출명도 같이 — 다른 방에서 나를 부를 이름을 알아야 상대에게 알려줄 수 있다
+  const handle = room.handle ? `@${room.handle} · ` : '';
   document.getElementById('chat-sub').textContent =
-    `${room.dir} · ${STATE_LABEL[room.state] || room.state}${model ? ' · ' + model : ''}`;
+    `${handle}${room.dir} · ${STATE_LABEL[room.state] || room.state}${model ? ' · ' + model : ''}`;
   document.getElementById('btn-kill').style.opacity = room.state === 'offline' ? 0.4 : 1;
   document.getElementById('btn-stop').classList.toggle('hidden', room.state !== 'working');
 }
@@ -499,10 +539,22 @@ function send() {
   renderAttachBar();
 }
 
-// ---------- 슬래시 커맨드 자동완성 ----------
+// ---------- 자동완성 (/ 슬래시 커맨드, @ 다른 방) ----------
+// 메뉴 하나를 두 용도로 쓴다 — 입력창 위 같은 자리에 뜨고 조작 키도 같아서,
+// 따로 두면 두 메뉴가 동시에 뜨는 상태를 관리해야 한다.
 
 const slashMenuEl = document.getElementById('slash-menu');
-let slashIndex = 0;
+let menuIndex = 0;
+let menuMode = null; // 'slash' | 'mention' | null
+
+// 다른 방 호출명 목록. 방이 새로 생기거나 이름이 바뀔 수 있어 오래되면 다시 받아온다.
+let handles = [];
+let handlesAt = 0;
+
+async function refreshHandles() {
+  handles = (await ipcRenderer.invoke('rooms:handles', roomId)) || [];
+  handlesAt = Date.now();
+}
 
 function slashCandidates() {
   const v = inputEl.value;
@@ -515,32 +567,79 @@ function slashCandidates() {
   return [...pre, ...inc];
 }
 
-function renderSlashMenu() {
-  const cands = slashCandidates();
-  slashMenuEl.classList.toggle('hidden', cands.length === 0);
-  if (cands.length === 0) return;
-  slashIndex = Math.min(slashIndex, cands.length - 1);
+// 커서 바로 앞의 @토큰. 단어 중간의 @(이메일 등)는 대상이 아니다.
+function mentionToken() {
+  const pos = inputEl.selectionStart ?? inputEl.value.length;
+  const before = inputEl.value.slice(0, pos);
+  const at = before.lastIndexOf('@');
+  if (at === -1) return null;
+  if (at > 0 && /\S/.test(before[at - 1])) return null;
+  const q = before.slice(at + 1);
+  if (/\s/.test(q)) return null;
+  return { at, q };
+}
+
+function mentionCandidates() {
+  const t = mentionToken();
+  if (!t) return [];
+  const q = t.q.toLowerCase();
+  const hit = (h) => h.handle.toLowerCase().startsWith(q);
+  const near = (h) => h.handle.toLowerCase().includes(q) || (h.title || '').toLowerCase().includes(q);
+  return [...handles.filter(hit), ...handles.filter((h) => !hit(h) && near(h))].slice(0, 40);
+}
+
+function menuState() {
+  const slash = slashCandidates();
+  if (slash.length) return { mode: 'slash', items: slash.map((c) => ({ key: c, label: '/' + c })) };
+  const men = mentionCandidates();
+  if (men.length) {
+    return { mode: 'mention', items: men.map((h) => ({ key: h.handle, label: '@' + h.handle, sub: h.title })) };
+  }
+  return { mode: null, items: [] };
+}
+
+function renderMenu() {
+  const { mode, items } = menuState();
+  menuMode = mode;
+  slashMenuEl.classList.toggle('hidden', items.length === 0);
+  if (!items.length) return;
+  menuIndex = Math.min(menuIndex, items.length - 1);
   slashMenuEl.innerHTML = '';
-  cands.forEach((c, i) => {
+  items.forEach((it, i) => {
     const el = document.createElement('div');
-    el.className = 'slash-item' + (i === slashIndex ? ' active' : '');
-    el.textContent = '/' + c;
+    el.className = 'slash-item' + (i === menuIndex ? ' active' : '');
+    const key = document.createElement('span');
+    key.className = 'slash-key';
+    key.textContent = it.label;
+    el.appendChild(key);
+    if (it.sub) {
+      const sub = document.createElement('span');
+      sub.className = 'slash-sub';
+      sub.textContent = it.sub;
+      el.appendChild(sub);
+    }
     el.onmousedown = (ev) => {
       ev.preventDefault();
-      completeSlash(c);
+      commitMenu(it.key);
     };
     slashMenuEl.appendChild(el);
   });
   slashMenuEl.querySelector('.active')?.scrollIntoView({ block: 'nearest' });
 }
 
-function closeSlashMenu() {
+function closeMenu() {
   slashMenuEl.classList.add('hidden');
-  slashIndex = 0;
+  menuIndex = 0;
+  menuMode = null;
+}
+
+function commitMenu(key) {
+  if (menuMode === 'mention') return completeMention(key);
+  return completeSlash(key);
 }
 
 function completeSlash(cmd) {
-  closeSlashMenu();
+  closeMenu();
   if (cmd === 'model') {
     inputEl.value = '';
     openModelPicker();
@@ -549,6 +648,26 @@ function completeSlash(cmd) {
   inputEl.value = '/' + cmd + ' ';
   autoGrow();
   inputEl.focus();
+}
+
+function completeMention(handle) {
+  const t = mentionToken();
+  closeMenu();
+  if (!t) return;
+  const pos = inputEl.selectionStart ?? inputEl.value.length;
+  const after = inputEl.value.slice(pos);
+  inputEl.value = inputEl.value.slice(0, t.at) + '@' + handle + after;
+  const caret = t.at + 1 + handle.length;
+  inputEl.setSelectionRange(caret, caret);
+  autoGrow();
+  inputEl.focus();
+}
+
+// 입력할 때마다 부르기엔 아까워서, @를 치기 시작한 순간에만 목록을 갱신한다
+function maybeRefreshHandles() {
+  if (!mentionToken()) return;
+  if (Date.now() - handlesAt < 30000) return;
+  refreshHandles().then(renderMenu);
 }
 
 // ---------- 모델 픽커 ----------
@@ -656,6 +775,58 @@ function openPermPicker() {
   permPickerEl.classList.remove('hidden');
 }
 
+// ---------- 자동 압축 시점 ----------
+//
+// 비용은 대략 "요청 수 × (임계 + 바닥)/2"다. 임계를 올리면 압축 횟수는 줄지만 매 요청이
+// 비싸지고, 잠든 방을 깨울 때 캐시를 통째로 다시 쓰는 값(정가의 125%)도 같이 오른다.
+// 어느 쪽이 이득인지는 방마다 달라서 고르게 뒀다. 설명 문구에 그 교환비를 그대로 적는다.
+const COMPACT_OPTS = [
+  { v: 140000, name: '140k · 자주', desc: '깨울 때 280k · 압축 가장 잦음' },
+  { v: 180000, name: '180k · 기본', desc: '깨울 때 360k · 권장' },
+  { v: 250000, name: '250k · 드물게', desc: '깨울 때 500k · 압축 약 35% 감소' },
+  { v: 400000, name: '400k · 아주 드물게', desc: '깨울 때 800k · 긴 맥락이 꼭 필요한 방만' },
+  { v: 800000, name: '800k · 터미널과 동일', desc: '깨울 때 1,600k · 매일 오래 붙잡는 방만' },
+];
+const compactPickerEl = document.getElementById('compact-picker');
+
+function openCompactPicker() {
+  const listEl = document.getElementById('compact-list');
+  const limit = lastRoomSummary?.contextLimit || 0;
+  const pick = lastRoomSummary?.compactPick || null;
+  listEl.innerHTML = '';
+  for (const o of COMPACT_OPTS) {
+    // 모델 한도의 80%를 넘는 선택지는 고를 수 없다 — 압축이 걸리기 전에 방이 막힌다
+    const tooBig = limit > 0 && o.v > limit * 0.8;
+    const cur = pick ? pick === o.v : o.v === 180000;
+    const el = document.createElement('div');
+    el.className = 'model-item' + (cur ? ' current' : '') + (tooBig ? ' disabled' : '');
+    el.innerHTML = `<div class="m-name"></div><div class="m-desc"></div>${cur ? '<div class="m-check">✓</div>' : ''}`;
+    el.querySelector('.m-name').textContent = o.name;
+    el.querySelector('.m-desc').textContent = tooBig
+      ? `현재 모델 한도(${Math.round(limit / 1000)}k)에는 너무 큽니다`
+      : o.desc;
+    if (!tooBig) {
+      el.onclick = () => {
+        compactPickerEl.classList.add('hidden');
+        ipcRenderer.invoke('room:setCompactAt', roomId, o.v === 180000 ? null : o.v);
+      };
+    }
+    listEl.appendChild(el);
+  }
+  const ctx = lastRoomSummary?.context || 0;
+  document.getElementById('compact-note').textContent =
+    // 이 방을 1시간 넘게 안 쓰면 캐시가 만료돼, 다음 첫 요청 하나가 컨텍스트 전체를 정가의
+    // 2배로 다시 씁니다. 실측상 이 재작성이 요청 수로는 2%인데 비용으로는 25%였습니다.
+    // 임계값을 고를 때 실제로 봐야 하는 숫자라 여기 적어둡니다.
+    `지금 ${Math.round(ctx / 1000)}k · 1시간 넘게 쉰 뒤 첫 요청은 컨텍스트 전체를 2배 값으로 다시 씁니다 — ` +
+    `임계값을 올리면 압축은 줄지만 이 "깨우는 값"이 그만큼 커집니다.`;
+  compactPickerEl.classList.remove('hidden');
+}
+
+compactPickerEl.addEventListener('click', (e) => {
+  if (e.target === compactPickerEl) compactPickerEl.classList.add('hidden');
+});
+
 function renderPermButton() {
   const btn = document.getElementById('btn-perm');
   const mode = roomInfo.permissionMode;
@@ -756,28 +927,29 @@ document.getElementById('btn-send').onclick = send;
 inputEl.addEventListener('keydown', (e) => {
   const menuOpen = !slashMenuEl.classList.contains('hidden');
   if (menuOpen) {
-    const cands = slashCandidates();
+    const { items } = menuState();
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      slashIndex = (slashIndex + 1) % cands.length;
-      renderSlashMenu();
+      menuIndex = (menuIndex + 1) % items.length;
+      renderMenu();
       return;
     }
     if (e.key === 'ArrowUp') {
       e.preventDefault();
-      slashIndex = (slashIndex - 1 + cands.length) % cands.length;
-      renderSlashMenu();
+      menuIndex = (menuIndex - 1 + items.length) % items.length;
+      renderMenu();
       return;
     }
     if ((e.key === 'Tab' || e.key === 'Enter') && !e.isComposing) {
-      const pick = cands[slashIndex];
-      // 이미 완성돼 있으면 Enter는 전송으로
-      if (pick && !(e.key === 'Enter' && inputEl.value === '/' + pick)) {
+      const pick = items[menuIndex];
+      // 슬래시가 이미 완성돼 있으면 Enter는 전송으로 (기존 동작)
+      const exact = menuMode === 'slash' && inputEl.value === pick?.label;
+      if (pick && !(e.key === 'Enter' && exact)) {
         e.preventDefault();
-        completeSlash(pick);
+        commitMenu(pick.key);
         return;
       }
-      closeSlashMenu();
+      closeMenu();
     }
   }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
@@ -795,9 +967,10 @@ autoGrow();
 
 inputEl.addEventListener('input', () => {
   autoGrow();
-  renderSlashMenu();
+  renderMenu();
+  maybeRefreshHandles();
 });
-inputEl.addEventListener('blur', () => setTimeout(closeSlashMenu, 150));
+inputEl.addEventListener('blur', () => setTimeout(closeMenu, 150));
 
 document.getElementById('btn-kill').onclick = () => {
   ipcRenderer.invoke('room:kill', roomId);
@@ -822,8 +995,10 @@ window.addEventListener('keydown', (e) => {
       closeQr();
     } else if (!permPickerEl.classList.contains('hidden')) {
       permPickerEl.classList.add('hidden');
+    } else if (!compactPickerEl.classList.contains('hidden')) {
+      compactPickerEl.classList.add('hidden');
     } else if (!slashMenuEl.classList.contains('hidden')) {
-      closeSlashMenu();
+      closeMenu();
     } else if (searchOpen) {
       closeSearch(); // 검색 중 ESC는 창을 숨기지 않고 검색만 닫는다
     } else {
@@ -860,16 +1035,39 @@ const pendingBarEl = document.getElementById('pending-bar');
 const pendingQueue = []; // {text, images}
 
 function addPendingRow(msg) {
-  pendingQueue.push({ text: msg.text, images: msg.images || [] });
+  // 역할을 같이 들고 있어야 투입될 때 원래 말풍선으로 그려진다 (전달돼 온 말도 대기줄에 들어간다)
+  pendingQueue.push({ text: msg.text, images: msg.images || [], role: msg.role, from: msg.from });
   const row = document.createElement('div');
-  row.className = 'pending-row';
+  row.className = 'pending-row' + (msg.role === 'peer' ? ' peer' : '');
   const tag = document.createElement('span');
   tag.className = 'pending-tag';
-  tag.textContent = '⏳ 대기';
+  tag.textContent = msg.role === 'peer' ? `⏳ @${msg.from}` : '⏳ 대기';
   const body = document.createElement('span');
   body.className = 'pending-text';
   body.textContent = (msg.images?.length ? `📷 사진${msg.images.length}장 ` : '') + (msg.text || '');
-  row.append(tag, body);
+
+  // 취소. 자리는 메인 프로세스가 실제로 뺀 곳을 알려주므로 그걸 그대로 따른다 —
+  // 여기서 다시 계산하면 그 사이 투입된 앞줄 때문에 한 칸씩 밀린 걸 지운다.
+  const cancel = document.createElement('button');
+  cancel.className = 'pending-cancel';
+  cancel.textContent = '✕';
+  cancel.title = '보내기 취소';
+  cancel.onclick = async () => {
+    const i = [...pendingBarEl.children].indexOf(row);
+    if (i < 0) return;
+    cancel.disabled = true;
+    // 창만 새로 열고 앱은 안 껐다 켠 상태면 메인 쪽에 핸들러가 없다 — 눌러도 안 죽게
+    const at = await ipcRenderer.invoke('room:cancel-pending', roomId, i, msg.text || '').catch(() => -1);
+    if (at < 0) {
+      cancel.disabled = false; // 이미 투입된 뒤였다 — queue-flushed가 알아서 치운다
+      return;
+    }
+    pendingQueue.splice(at, 1);
+    pendingBarEl.children[at]?.remove();
+    if (pendingBarEl.childElementCount === 0) pendingBarEl.classList.add('hidden');
+  };
+
+  row.append(tag, body, cancel);
   pendingBarEl.appendChild(row);
   pendingBarEl.classList.remove('hidden');
 }
@@ -880,7 +1078,13 @@ ipcRenderer.on('room:queue-flushed', () => {
   pendingBarEl.firstElementChild?.remove();
   if (pendingBarEl.childElementCount === 0) pendingBarEl.classList.add('hidden');
   if (item) {
-    appendMessage({ role: 'user', text: item.text, images: item.images, ts: new Date().toISOString() });
+    appendMessage({
+      role: item.role || 'user',
+      from: item.from,
+      text: item.text,
+      images: item.images,
+      ts: new Date().toISOString(),
+    });
   }
 });
 
@@ -909,4 +1113,5 @@ ipcRenderer.on('room:history-reset', (e, messages) => {
   renderHistory(res.messages);
   scrollToBottom({ force: true }); // 방을 열 때는 항상 최신 메시지부터
   inputEl.focus();
+  refreshHandles(); // @자동완성 준비 (첫 입력을 기다리지 않게)
 })();

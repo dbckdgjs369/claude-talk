@@ -253,7 +253,9 @@ body.room-window { background: var(--bg-chat); }
 .header-actions button:hover { background: var(--hover); }
 
 /* 컨텍스트 크기 — 평소엔 조용히, 무거워지면 눈에 띄게 */
-.ctx-size { color: var(--fg-dim); }
+/* 압축 시점 픽커로 가는 입구라 눌리는 것처럼 보여야 한다 */
+.ctx-size { color: var(--fg-dim); cursor: pointer; }
+.ctx-size:hover { text-decoration: underline; }
 .ctx-size.warn { color: var(--accent); }
 .ctx-size.danger { color: var(--badge); font-weight: 700; }
 
@@ -810,6 +812,62 @@ body.viewer-window {
 }
 .slash-item:hover { background: var(--bg-elev); color: var(--fg); }
 .slash-item.active { background: var(--active); color: var(--accent); }
+/* @자동완성은 호출명 옆에 방 제목을 붙여 준다 — 호출명만으론 어느 방인지 헷갈린다 */
+.slash-item { display: flex; align-items: baseline; gap: 10px; }
+.slash-key { flex-shrink: 0; }
+.slash-sub {
+  font-family: inherit;
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  opacity: .75;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.slash-item.active .slash-sub { color: var(--fg-dim); }
+
+/* ---------- 다른 방에서 온 말풍선 ---------- */
+/* 이 방 claude의 말과 구분돼야 한다. 왼쪽 정렬은 같지만 이름표와 색 띠를 붙인다. */
+.msg.peer { align-self: flex-start; }
+.peer-col { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.peer-name {
+  align-self: flex-start;
+  background: none;
+  border: none;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  color: hsl(var(--peer-hue, 210) 65% 68%);
+}
+.peer-name:hover { text-decoration: underline; }
+.msg.peer .bubble {
+  background: var(--bg-bubble-other);
+  border-top-left-radius: 4px;
+  border-left: 3px solid hsl(var(--peer-hue, 210) 60% 55%);
+}
+body.light .peer-name { color: hsl(var(--peer-hue, 210) 55% 42%); }
+/* 취소 버튼은 평소엔 흐리게 — 대기줄은 읽는 영역이지 누르는 영역이 아니다 */
+.pending-cancel {
+  flex-shrink: 0;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 5px;
+  border-radius: 6px;
+  cursor: pointer;
+  opacity: .45;
+}
+.pending-row:hover .pending-cancel { opacity: 1; }
+.pending-cancel:hover { background: var(--bg-hover); color: #e5534b; }
+.pending-cancel:disabled { opacity: .25; cursor: default; }
+
+.pending-row.peer { justify-content: flex-start; }
+.pending-row.peer .pending-cancel { order: -1; }
+.pending-row.peer .pending-tag { color: hsl(210 60% 62%); }
 
 /* ---------- 모델 픽커 ---------- */
 /* 권한 픽커는 모델 픽커와 생김새를 공유한다 (.picker-card / .model-item 재사용) */
@@ -822,6 +880,7 @@ body.viewer-window {
 
 #model-picker,
 #qr-modal,
+#compact-picker,
 #perm-picker {
   position: fixed;
   inset: 0;
@@ -863,6 +922,17 @@ body.viewer-window {
 }
 .model-item:hover { background: var(--hover); }
 .model-item.current .m-name { color: var(--accent); }
+/* 모델 한도를 넘는 압축 시점처럼 고를 수 없는 항목 */
+.model-item.disabled { opacity: .4; cursor: default; }
+.model-item.disabled:hover { background: none; }
+.picker-note {
+  font-size: 11.5px;
+  color: var(--fg-dim);
+  line-height: 1.5;
+  padding: 8px 4px 0;
+  border-top: 1px solid var(--border);
+  margin-top: 6px;
+}
 .m-name { font-weight: 700; font-size: 13px; }
 .m-desc { font-size: 11.5px; color: var(--fg-dim); }
 .m-check { color: var(--accent); font-weight: 800; }
