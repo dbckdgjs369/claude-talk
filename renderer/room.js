@@ -518,6 +518,12 @@ function renderHeader(room) {
     `${handle}${room.dir} · ${STATE_LABEL[room.state] || room.state}${model ? ' · ' + model : ''}`;
   document.getElementById('btn-kill').style.opacity = room.state === 'offline' ? 0.4 : 1;
   document.getElementById('btn-stop').classList.toggle('hidden', room.state !== 'working');
+  // 폰 연결은 창보다 오래 산다(12시간). 창을 닫았다 열어도 표시가 유지되도록 메인이
+  // 알려준 값을 그대로 따른다 — 렌더러가 기억하는 토큰은 창과 함께 사라진다.
+  if (room.phoneToken !== undefined) {
+    qrToken = room.phoneToken;
+    markPhoneLink();
+  }
 }
 let lastRoomSummary = null;
 
@@ -697,12 +703,28 @@ pickerEl.addEventListener('click', (e) => {
   if (e.target === pickerEl) pickerEl.classList.add('hidden');
 });
 
-// ---------- 폰에서 사진 넣기 (QR) ----------
+// ---------- 폰에서 이어서 대화 (QR) ----------
+//
+// 예전엔 사진 한 장 올리는 용도라 모달을 닫을 때 주소를 무효화했다. 이제는 QR을 찍고
+// 자리를 뜨는 게 목적이라 그러면 기능이 성립하지 않는다 — 닫아도 살려두고, 끊는 건
+// 명시적으로 누르게 한다. 대신 살아있는 동안 📱 버튼에 표시가 남는다.
 const qrModalEl = document.getElementById('qr-modal');
+const qrRevokeEl = document.getElementById('qr-revoke');
+const btnPhoneEl = document.getElementById('btn-phone');
 let qrToken = null;
 
+function markPhoneLink() {
+  btnPhoneEl.classList.toggle('linked', !!qrToken);
+  btnPhoneEl.dataset.tip = qrToken
+    ? '폰에서 이어서 대화 — 연결됨 (눌러서 주소 보기·끊기)'
+    : '폰에서 이어서 대화 — QR을 찍으세요 (같은 Wi-Fi)';
+  qrRevokeEl.classList.toggle('hidden', !qrToken);
+}
+
 async function openQr() {
-  const res = await ipcRenderer.invoke('room:uploadUrl', roomId);
+  // 이미 살아있는 주소가 있으면 그걸 다시 보여준다. 열 때마다 새로 내면 앞서 찍어둔
+  // 폰이 조용히 죽고, 무효화되지 않은 토큰만 쌓인다.
+  const res = await ipcRenderer.invoke('room:uploadUrl', roomId, qrToken);
   if (!res) return;
   const body = document.getElementById('qr-body');
   if (res.error) {
@@ -716,15 +738,21 @@ async function openQr() {
     document.getElementById('qr-img').src = res.qr;
     document.getElementById('qr-url').textContent = res.url;
   }
+  markPhoneLink();
   qrModalEl.classList.remove('hidden');
 }
 
+// 닫기는 모달만 접는다 — 폰 연결은 그대로 살아있다
 function closeQr() {
   qrModalEl.classList.add('hidden');
-  // 창을 닫으면 주소를 무효화한다 — 같은 Wi-Fi의 다른 기기가 계속 쓸 수 있으면 안 된다
+}
+
+qrRevokeEl.onclick = () => {
   if (qrToken) ipcRenderer.invoke('room:uploadDone', qrToken);
   qrToken = null;
-}
+  markPhoneLink();
+  qrModalEl.classList.add('hidden');
+};
 
 document.getElementById('btn-phone').onclick = openQr;
 qrModalEl.addEventListener('click', (e) => {
@@ -778,14 +806,15 @@ function openPermPicker() {
 // ---------- 자동 압축 시점 ----------
 //
 // 비용은 대략 "요청 수 × (임계 + 바닥)/2"다. 임계를 올리면 압축 횟수는 줄지만 매 요청이
-// 비싸지고, 잠든 방을 깨울 때 캐시를 통째로 다시 쓰는 값(정가의 125%)도 같이 오른다.
-// 어느 쪽이 이득인지는 방마다 달라서 고르게 뒀다. 설명 문구에 그 교환비를 그대로 적는다.
+// 비싸진다. 잠든 방을 깨우는 값은 이제 임계와 무관하다 — 유휴 종료 전에 압축하고 재우므로
+// (engine.compactBeforeIdle) 어떤 임계를 골라도 깨울 때는 바닥값이다. 그래서 이 선택은
+// "압축을 얼마나 자주 맞을 것인가 vs 턴마다 얼마를 다시 읽을 것인가"만 남는다.
 const COMPACT_OPTS = [
-  { v: 140000, name: '140k · 자주', desc: '깨울 때 280k · 압축 가장 잦음' },
-  { v: 180000, name: '180k · 기본', desc: '깨울 때 360k · 권장' },
-  { v: 250000, name: '250k · 드물게', desc: '깨울 때 500k · 압축 약 35% 감소' },
-  { v: 400000, name: '400k · 아주 드물게', desc: '깨울 때 800k · 긴 맥락이 꼭 필요한 방만' },
-  { v: 800000, name: '800k · 터미널과 동일', desc: '깨울 때 1,600k · 매일 오래 붙잡는 방만' },
+  { v: 140000, name: '140k · 가장 저렴', desc: '턴당 읽기 최소 · 압축 가장 잦음' },
+  { v: 180000, name: '180k · 자주', desc: '도구를 많이 부르는 방에 유리' },
+  { v: 250000, name: '250k · 보통', desc: '압축 약 35% 감소' },
+  { v: 400000, name: '400k · 드물게', desc: '턴당 읽기 1.6배 · 긴 맥락이 필요한 방' },
+  { v: 'limit', name: '한도까지 · 기본', desc: '모델이 꽉 찰 때(92%)까지 · 압축 가장 드묾' },
 ];
 const compactPickerEl = document.getElementById('compact-picker');
 
@@ -795,9 +824,10 @@ function openCompactPicker() {
   const pick = lastRoomSummary?.compactPick || null;
   listEl.innerHTML = '';
   for (const o of COMPACT_OPTS) {
-    // 모델 한도의 80%를 넘는 선택지는 고를 수 없다 — 압축이 걸리기 전에 방이 막힌다
-    const tooBig = limit > 0 && o.v > limit * 0.8;
-    const cur = pick ? pick === o.v : o.v === 180000;
+    // 모델 한도의 80%를 넘는 절대값은 고를 수 없다 — 압축이 걸리기 전에 방이 막힌다.
+    // '한도까지'는 한도에 맞춰 따라가므로 언제나 고를 수 있다.
+    const tooBig = typeof o.v === 'number' && limit > 0 && o.v > limit * 0.8;
+    const cur = pick ? pick === o.v : o.v === 'limit';
     const el = document.createElement('div');
     el.className = 'model-item' + (cur ? ' current' : '') + (tooBig ? ' disabled' : '');
     el.innerHTML = `<div class="m-name"></div><div class="m-desc"></div>${cur ? '<div class="m-check">✓</div>' : ''}`;
@@ -808,18 +838,18 @@ function openCompactPicker() {
     if (!tooBig) {
       el.onclick = () => {
         compactPickerEl.classList.add('hidden');
-        ipcRenderer.invoke('room:setCompactAt', roomId, o.v === 180000 ? null : o.v);
+        ipcRenderer.invoke('room:setCompactAt', roomId, o.v === 'limit' ? null : o.v);
       };
     }
     listEl.appendChild(el);
   }
   const ctx = lastRoomSummary?.context || 0;
   document.getElementById('compact-note').textContent =
-    // 이 방을 1시간 넘게 안 쓰면 캐시가 만료돼, 다음 첫 요청 하나가 컨텍스트 전체를 정가의
-    // 2배로 다시 씁니다. 실측상 이 재작성이 요청 수로는 2%인데 비용으로는 25%였습니다.
-    // 임계값을 고를 때 실제로 봐야 하는 숫자라 여기 적어둡니다.
-    `지금 ${Math.round(ctx / 1000)}k · 1시간 넘게 쉰 뒤 첫 요청은 컨텍스트 전체를 2배 값으로 다시 씁니다 — ` +
-    `임계값을 올리면 압축은 줄지만 이 "깨우는 값"이 그만큼 커집니다.`;
+    // 깨우는 값은 이제 이 선택과 무관하다 — 유휴 종료 전에 압축하고 재우기 때문이다.
+    // 남은 교환비는 "압축을 얼마나 자주 맞느냐 vs 턴마다 얼마를 다시 읽느냐"뿐이라 그걸 적는다.
+    // (압축 한 번은 실측 중앙값 171초로 크기와 거의 무관하다)
+    `지금 ${Math.round(ctx / 1000)}k · 압축 한 번은 약 3분 걸립니다 — 임계를 올리면 압축은 드물어지고 ` +
+    `대신 턴마다 다시 읽는 양이 그만큼 늘어납니다. 잠든 방을 깨우는 값은 이 선택과 무관합니다.`;
   compactPickerEl.classList.remove('hidden');
 }
 

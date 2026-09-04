@@ -15,7 +15,7 @@ const {
   applyTitleBarTheme,
 } = require('./lib/platform');
 const { RoomsStore } = require('./lib/rooms-store');
-const { HeadlessSession, COMPACT_CHOICES, AUTO_COMPACT_AT } = require('./lib/engine');
+const { HeadlessSession, COMPACT_CHOICES } = require('./lib/engine');
 const fs = require('fs');
 const { scanPastSessions, deleteSessionFile, titleForFile, tailInfoForFile, renameSession, normalizeSdkMarkers } = require('./lib/sessions-index');
 const { sessionFileFor, parseFileSync } = require('./lib/transcript');
@@ -78,9 +78,12 @@ function roomSummary(room) {
     contextLimit: s?._contextLimit?.() || 0,
     // 자동 압축이 걸리는 지점 — 상태줄 경고 색을 모델 한도가 아니라 이 값 기준으로 매긴다.
     // 방이 꺼져 있으면 모델을 몰라 한도로 깎을 수 없다 → 고른 값(없으면 기본)을 그대로 보여준다.
-    compactAt: s?._compactAt?.() || room.compactAt || AUTO_COMPACT_AT,
+    // 'limit'은 한도를 알아야 숫자가 되므로 방이 꺼져 있으면 0(=모름)으로 넘긴다
+    compactAt: s?._compactAt?.() || (typeof room.compactAt === 'number' ? room.compactAt : 0),
     // 사용자가 직접 고른 값(안 골랐으면 null) — 픽커에서 "기본"과 구분해 체크 표시하는 데 쓴다
     compactPick: room.compactAt || null,
+    // 폰에서 열어둔 주소(없으면 null). 창을 닫았다 열면 렌더러는 이걸 잊으므로 메인이 알려준다
+    phoneToken: uploader.tokenFor(room.id),
     // 분기 방이면 목록에서 원본을 알 수 있게 (원본이 삭제됐으면 이름은 비어 있다)
     forkedFrom: room.forkedFrom || null,
     forkedFromName: room.forkedFrom ? store.get(room.forkedFrom)?.aiTitle || store.get(room.forkedFrom)?.name || null : null,
@@ -301,6 +304,7 @@ function ensureSession(room) {
     }
     const w = roomWins.get(room.id);
     if (w && !w.isDestroyed()) w.webContents.send('room:message', msg);
+    feedPush(room.id, msg);
     broadcast(room);
     // 답변에 @호출명이 있으면 그 부분을 상대 방으로 넘긴다. 말풍선을 먼저 보낸 뒤에
     // 호출해야 "↗ 전달했어요" 줄이 그 아래에 붙는다.
@@ -556,6 +560,13 @@ function scheduleIdleKill(roomId, delay = IDLE_KILL_MS) {
       if (s?.child && (s.state === 'working' || s.state === 'starting')) {
         scheduleIdleKill(roomId, IDLE_RECHECK_MS);
       }
+      return;
+    }
+    // 그냥 내리면 다음에 깨울 때 컨텍스트 × 2를 문다. 큰 방은 먼저 압축해서 그 값을
+    // 바닥까지 낮춘 뒤에 내린다 (compactBeforeIdle 주석 참고). 압축은 턴이라 지금은
+    // 못 죽이고, 위 재확인 경로가 끝난 뒤 다시 와서 내린다.
+    if (sessions.get(roomId).compactBeforeIdle()) {
+      scheduleIdleKill(roomId, IDLE_RECHECK_MS);
       return;
     }
     sessions.get(roomId).kill();
@@ -1069,7 +1080,9 @@ ipcMain.handle('room:init', (e, id) => {
   };
 });
 
-ipcMain.handle('room:send', (e, id, text, images) => {
+// 사용자의 말 한 번을 방에 넣는다. 창에서 보내든 폰에서 보내든 같은 길을 타야
+// 멘션 처리·전달 체인 리셋이 한쪽에만 빠지는 일이 없다.
+function sendUserMessage(id, text, images) {
   const room = store.get(id);
   if (!room) return;
   const s = ensureSession(room);
@@ -1095,7 +1108,9 @@ ipcMain.handle('room:send', (e, id, text, images) => {
       );
     }
   }
-});
+}
+
+ipcMain.handle('room:send', (e, id, text, images) => sendUserMessage(id, text, images));
 
 // 대기줄에서 아직 안 나간 말 취소. 방이 꺼져 있으면 대기줄도 없다(-1).
 ipcMain.handle('room:cancel-pending', (e, id, index, text) => {
@@ -1135,26 +1150,95 @@ ipcMain.handle('room:kill', (e, id) => {
   if (s) s.kill();
 });
 
-// ---------- 폰에서 사진 넣기 (같은 Wi-Fi, QR) ----------
+// ---------- 폰에서 대화하기·사진 넣기 (같은 Wi-Fi, QR) ----------
+
+// 폰이 폴링으로 가져갈 방별 대화 버퍼. 매번 s.history()를 부르면 큰 방은 세션 파일을
+// 통째로 다시 접어야 해서(8.5MB짜리도 있다) 1.2초마다 그걸 할 수는 없다. 대신 여기에
+// 흘려보내며 쌓고, 폰은 마지막으로 받은 seq 뒤의 것만 가져간다.
+const FEED_LIMIT = 60; // 폰 화면에서 그 이상 거슬러 올라가 읽지 않는다
+const feeds = new Map(); // roomId → { seq, items: [{seq, role, text, from, img}] }
+
+// 폰으로 보내기 좋게 말풍선 하나를 줄인다. 도구 출력은 수백 줄씩 오는데 폰에서는
+// 그게 대화를 덮어버리므로 한 줄로 접는다.
+function feedItem(msg, seq) {
+  const cap = msg.role === 'tool' ? 160 : 4000;
+  const it = { seq, role: msg.role || 'assistant', text: truncate(plainify(msg.text || ''), cap) };
+  if (msg.from) it.from = msg.from;
+  // 사진은 첫 장만, 그대로 data URL로 실어 보낸다 (폰이 파일을 다시 받아갈 창구가 없다)
+  const img = msg.images?.[0];
+  if (img?.base64) it.img = `data:${img.mediaType || 'image/jpeg'};base64,${img.base64}`;
+  return it;
+}
+
+function feedPush(roomId, msg) {
+  const f = feeds.get(roomId);
+  if (!f) return; // 폰이 붙은 적 없는 방은 쌓지 않는다 (69개 방 전부 버퍼를 들 이유가 없다)
+  f.seq++;
+  f.items.push(feedItem(msg, f.seq));
+  if (f.items.length > FEED_LIMIT) f.items.splice(0, f.items.length - FEED_LIMIT);
+}
+
+// 폰이 처음 붙을 때 지난 대화를 채워둔다. 빈 화면으로 시작하면 무슨 방인지 알 수 없다.
+function feedSeed(roomId) {
+  if (feeds.has(roomId)) return;
+  const f = { seq: 0, items: [] };
+  feeds.set(roomId, f);
+  const room = store.get(roomId);
+  const s = room && sessions.get(roomId);
+  // 세션이 안 떠 있으면 굳이 띄우지 않는다 — 깨우는 값이 크다(resume 재작성). 폰에서
+  // 첫 말을 보내면 그때 깨어나고, 그 뒤로는 실시간으로 쌓인다.
+  if (!s) return;
+  try {
+    for (const m of s.history().slice(-FEED_LIMIT)) {
+      f.seq++;
+      f.items.push(feedItem(m, f.seq));
+    }
+  } catch {}
+}
 
 const uploader = new UploadServer();
 uploader.onPhoto = (roomId, photo) => {
   const w = roomWins.get(roomId);
-  if (!w || w.isDestroyed()) return;
-  w.webContents.send('room:photo', photo);
-  w.show(); // 폰에서 보냈으면 맥 화면에서 바로 보이는 게 자연스럽다
+  // 맥에서 그 방을 보고 있으면 첨부칸에 꽂아준다 — 캡션을 이어 쓰고 보낼 수 있게.
+  // 창이 닫혀 있으면 예전엔 그냥 버렸는데, 폰에서 쓸 때는 그게 정확히 안 되는 상황이다
+  // (자리를 비웠으니 폰으로 보낸 것이다). 그때는 곧장 방에 넣는다.
+  if (w && !w.isDestroyed() && w.isVisible()) {
+    w.webContents.send('room:photo', photo);
+    w.show();
+    return;
+  }
+  const img = { name: photo.name, mediaType: photo.mediaType, base64: photo.base64 };
+  sendUserMessage(roomId, photo.caption || '사진', [img]);
 };
 
-ipcMain.handle('room:uploadUrl', async (e, id) => {
+// 폰에서 친 말. 창에서 보낸 것과 같은 길을 타므로 맥 화면에도 그대로 뜬다.
+uploader.onSend = (roomId, text) => sendUserMessage(roomId, text, []);
+
+uploader.getFeed = (roomId, since) => {
+  feedSeed(roomId);
+  const f = feeds.get(roomId) || { seq: 0, items: [] };
+  const room = store.get(roomId);
+  return {
+    seq: f.seq,
+    // 폰이 오래 꺼져 있어 버퍼에서 밀려났으면 남은 것부터 준다 (구멍은 생기지만 멈추진 않는다)
+    items: f.items.filter((i) => i.seq > since),
+    state: sessions.get(roomId)?.state || 'offline',
+    title: room ? room.aiTitle || room.name : 'CC Talk',
+  };
+};
+
+ipcMain.handle('room:uploadUrl', async (e, id, existing) => {
   if (!store.get(id)) return null;
   try {
     await uploader.start();
-    const token = uploader.issue(id);
+    feedSeed(id); // QR을 띄우는 시점에 지난 대화를 채워둔다
+    // 아직 살아있는 주소가 있으면 그대로 다시 보여준다 — 새로 내면 이미 찍어둔 폰이 죽는다
+    const token = uploader.has(id, existing) ? existing : uploader.issue(id);
     const url = uploader.urlFor(token);
     if (!url) return { error: 'Wi-Fi에 연결돼 있지 않아요. 같은 네트워크가 필요합니다.' };
     return { url, token, qr: await QRCode.toDataURL(url, { margin: 1, width: 260 }) };
   } catch (err) {
-    return { error: `업로드 서버를 열 수 없어요 (${err.code || err.message})` };
+    return { error: `서버를 열 수 없어요 (${err.code || err.message})` };
   }
 });
 
