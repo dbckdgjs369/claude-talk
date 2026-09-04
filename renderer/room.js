@@ -2,6 +2,7 @@ const { ipcRenderer, webUtils, shell } = require('electron');
 const MarkdownIt = require('markdown-it');
 const createDOMPurify = require('dompurify');
 const DOMPurify = createDOMPurify(window);
+const { ROOM_COLORS, colorOf } = require('./colors');
 
 // html:false = 원문 HTML 차단(1차 방어), breaks = 채팅답게 한 줄 개행도 줄바꿈
 const mdEngine = new MarkdownIt({ html: false, breaks: true, linkify: true });
@@ -294,6 +295,124 @@ document.getElementById('task-bar').onclick = () => {
 
 ipcRenderer.on('room:tasks', (e, summary) => renderTasks(summary));
 
+// ---------- 공지 패널 (이 방에 영향을 주는 md 파일들) ----------
+// 방을 열었을 때 이 세션이 뭘 읽고 시작하는지가 어디에도 안 보였다. 그런데 그게 곧 매
+// 요청의 바닥값이라, 압축을 아무리 돌려도 안 내려가는 부분이 어디서 오는지 설명해 준다.
+// 그래서 목록만 세지 않고 "항상 읽음"과 "이름만 올라감"을 갈라서 보여준다 — 스킬 24개가
+// 본문째 올라가는 게 아니라 설명 한 줄씩만 올라간다는 걸 알아야 숫자가 납득이 된다.
+const noticePanelEl = document.getElementById('notice-panel');
+const noticeBodyEl = document.getElementById('notice-body');
+let noticeOpen = false;
+let harness = null;
+// 그룹별 "더 보기" 상태. 스킬이 24개씩 되는 경우가 있어서 기본은 접어 둔다.
+const noticeExpanded = new Set();
+const NOTICE_HEAD = 5;
+
+const fmtTok = (n) => (n >= 1000 ? (n / 1000).toFixed(1).replace(/\.0$/, '') + 'k' : String(n));
+
+function noticeFileRow(item, label) {
+  const b = document.createElement('button');
+  b.className = 'notice-file';
+  b.title = item.path;
+  // 어디서 온 파일인지. CLAUDE.md는 kind(전역/상위폴더/프로젝트/import), 에이전트·스킬은
+  // scope(전역/프로젝트)로 온다 — 같은 자리에 같은 크기로 찍어서 줄이 어긋나지 않게 한다.
+  const tag = item.scope
+    ? { project: '프로젝트', user: '전역' }[item.scope]
+    : { user: '전역', ancestor: '상위폴더', project: '프로젝트', import: '↳ import' }[item.kind];
+  if (tag) {
+    const s = document.createElement('span');
+    s.className = 'notice-scope';
+    s.textContent = tag;
+    b.appendChild(s);
+  }
+  const n = document.createElement('span');
+  n.className = 'notice-name';
+  n.textContent = label;
+  b.appendChild(n);
+  // 파일마다 토큰 수를 찍어 봤는데, 단위가 없으니 크기인지 뭔지 알 수가 없었다. 합계는
+  // 접힌 줄에 ≈7.4k로 한 번 나오면 충분하다 — 줄마다 숫자가 붙으면 이름이 안 읽힌다.
+  b.onclick = () => ipcRenderer.invoke('room:openHarnessFile', roomId, item.path);
+  return b;
+}
+
+function noticeGroup(key, title, note, items, labelOf) {
+  const g = document.createElement('div');
+  g.className = 'notice-group';
+  const head = document.createElement('div');
+  head.className = 'notice-head';
+  const b = document.createElement('b');
+  b.textContent = `${title} ${items.length}`;
+  head.append(b, document.createTextNode(note));
+  g.appendChild(head);
+
+  if (!items.length) {
+    const e = document.createElement('div');
+    e.className = 'notice-empty';
+    e.textContent = '없음';
+    g.appendChild(e);
+    return g;
+  }
+  const open = noticeExpanded.has(key);
+  const shown = open ? items : items.slice(0, NOTICE_HEAD);
+  for (const it of shown) g.appendChild(noticeFileRow(it, labelOf(it)));
+  if (items.length > NOTICE_HEAD) {
+    const more = document.createElement('button');
+    more.className = 'notice-more';
+    more.textContent = open ? '접기' : `+ ${items.length - NOTICE_HEAD}개 더`;
+    more.onclick = () => {
+      if (open) noticeExpanded.delete(key);
+      else noticeExpanded.add(key);
+      renderNotice();
+    };
+    g.appendChild(more);
+  }
+  return g;
+}
+
+// 홈 아래 경로는 ~로 줄인다. 폭이 좁아서 전체 경로를 그대로 두면 이름이 잘려 나간다.
+function shortPath(p) {
+  const home = harness?.home;
+  return home && p.startsWith(home) ? '~' + p.slice(home.length) : p;
+}
+
+function renderNotice() {
+  if (!harness || harness.error) {
+    noticePanelEl.classList.add('hidden');
+    return;
+  }
+  noticePanelEl.classList.remove('hidden');
+
+  const total = harness.alwaysTokens + harness.listedTokens;
+  document.getElementById('notice-label').textContent =
+    `이 방이 읽는 것 · CLAUDE.md ${harness.memory.length} · 에이전트 ${harness.agents.length} · 스킬 ${harness.skills.length}`;
+  document.getElementById('notice-count').textContent = `≈${fmtTok(total)}`;
+
+  noticeBodyEl.innerHTML = '';
+  noticeBodyEl.appendChild(
+    noticeGroup('memory', 'CLAUDE.md', ' · 매 요청 전문이 올라감', harness.memory, (m) => shortPath(m.path))
+  );
+  const listedNote = ` · 이름과 설명 한 줄만 올라감 (본문은 부를 때)`;
+  noticeBodyEl.appendChild(noticeGroup('agents', '에이전트', listedNote, harness.agents, (a) => a.name));
+  noticeBodyEl.appendChild(noticeGroup('skills', '스킬', listedNote, harness.skills, (s) => s.name));
+  if (harness.commands.length) {
+    noticeBodyEl.appendChild(noticeGroup('commands', '커맨드', listedNote, harness.commands, (c) => c.name));
+  }
+}
+
+async function loadNotice() {
+  harness = await ipcRenderer.invoke('room:harness', roomId);
+  renderNotice();
+}
+
+document.getElementById('notice-bar').onclick = () => {
+  noticeOpen = !noticeOpen;
+  noticeBodyEl.classList.toggle('hidden', !noticeOpen);
+  document.getElementById('notice-caret').textContent = noticeOpen ? '▾' : '▸';
+  // 펼칠 때 디스크를 다시 읽는다 — 파일을 고치고 돌아왔는데 낡은 값이 떠 있으면
+  // 이 패널을 믿을 수 없게 된다
+  if (noticeOpen) loadNotice();
+};
+
 // 말풍선 안 사진의 표시 크기. 가로·세로 어느 쪽도 220을 넘지 않게 원본 비율로 줄인다.
 // 원본보다 키우지는 않는다 (작은 썸네일이 뿌옇게 늘어나는 걸 막으려고 scale 상한 1).
 // width만 지정하고 height는 auto — 좁은 창에서 CSS max-width:100%가 먹을 때도 비율이 유지된다.
@@ -516,6 +635,7 @@ function renderHeader(room) {
   const handle = room.handle ? `@${room.handle} · ` : '';
   document.getElementById('chat-sub').textContent =
     `${handle}${room.dir} · ${STATE_LABEL[room.state] || room.state}${model ? ' · ' + model : ''}`;
+  applyRoomColor(room);
   document.getElementById('btn-kill').style.opacity = room.state === 'offline' ? 0.4 : 1;
   document.getElementById('btn-stop').classList.toggle('hidden', room.state !== 'working');
   // 폰 연결은 창보다 오래 산다(12시간). 창을 닫았다 열어도 표시가 유지되도록 메인이
@@ -769,6 +889,57 @@ ipcRenderer.on('room:photo', (e, photo) => {
   }
   closeQr();
   inputEl.focus();
+});
+
+// ---------- 방 색상 ----------
+// 방이 스무 개씩 되면 제목만으로는 목록에서 못 찾는다. 색은 글자보다 빨리 읽히고, 몇 개만
+// 칠해 두면 나머지 회색 사이에서 그것들만 눈에 들어온다 — 그래서 전부 칠하도록 강요하지
+// 않고 "색 없음"을 기본이자 되돌아갈 수 있는 선택지로 남겨 뒀다.
+const colorPickerEl = document.getElementById('color-picker');
+
+function applyRoomColor(room) {
+  const c = colorOf(room?.color);
+  // CSS 쪽에서 var(--room-color)로 아바타·헤더선·버튼 동그라미가 한꺼번에 따라온다
+  document.documentElement.style.setProperty('--room-color', c ? c.hex : '');
+  // body에 걸어야 채팅 바닥·헤더·입력창·말풍선이 한꺼번에 따라온다
+  document.body.classList.toggle('tinted', !!c);
+  const btn = document.getElementById('btn-color');
+  // 색이 없으면 빈 동그라미가 아니라 🎨를 띄운다 — 빈 동그라미는 헤더에서 그냥 안 보인다
+  btn.querySelector('#color-dot').classList.toggle('hidden', !c);
+  btn.querySelector('.color-icon').classList.toggle('hidden', !!c);
+  btn.dataset.tip = c ? `방 색상: ${c.name} — 클릭해서 변경` : '방 색상 — 목록에서 이 방을 알아보기 쉽게';
+}
+
+function openColorPicker() {
+  const wrap = document.getElementById('color-swatches');
+  const cur = lastRoomSummary?.color || null;
+  wrap.innerHTML = '';
+  const add = (c) => {
+    const b = document.createElement('button');
+    const isCur = (c?.id || null) === cur;
+    b.className = 'swatch' + (isCur ? ' current' : '') + (c ? '' : ' none');
+    const dot = document.createElement('i');
+    if (c) dot.style.background = c.hex;
+    const label = document.createElement('span');
+    label.textContent = c ? c.name : '없음';
+    b.append(dot, label);
+    b.onclick = () => {
+      colorPickerEl.classList.add('hidden');
+      // 응답을 기다리지 않고 먼저 칠한다 — 색은 되돌리기 쉬운 표시라 낙관적으로 반영해도 된다
+      if (lastRoomSummary) lastRoomSummary.color = c?.id || null;
+      applyRoomColor(lastRoomSummary);
+      ipcRenderer.invoke('room:setColor', roomId, c?.id || null);
+    };
+    wrap.appendChild(b);
+  };
+  for (const c of ROOM_COLORS) add(c);
+  add(null);
+  colorPickerEl.classList.remove('hidden');
+}
+
+document.getElementById('btn-color').onclick = openColorPicker;
+colorPickerEl.addEventListener('click', (e) => {
+  if (e.target === colorPickerEl) colorPickerEl.classList.add('hidden');
 });
 
 // ---------- 권한 모드 픽커 ----------
@@ -1139,6 +1310,7 @@ ipcRenderer.on('room:history-reset', (e, messages) => {
   updateStatusbar();
   renderPermButton();
   renderTasks(res.tasks);
+  loadNotice(); // 접힌 한 줄만 먼저 채운다 (본문은 펼칠 때 다시 읽는다)
   forkedAt = res.forkedAt || 0;
   renderHistory(res.messages);
   scrollToBottom({ force: true }); // 방을 열 때는 항상 최신 메시지부터

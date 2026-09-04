@@ -167,10 +167,12 @@ body.list-window { background: var(--bg-sidebar); }
 }
 .room:hover { background: var(--hover-soft); }
 
+/* 방 색을 고르면 아바타 배경이 그 색이 된다 — 목록에서 방을 알아보는 가장 빠른 단서다.
+   색을 안 고른 방은 기존 회색 그대로라, 몇 개만 칠해도 그것들만 튀어나와 보인다. */
 .room .avatar {
   width: 46px; height: 46px;
   border-radius: 16px;
-  background: var(--neutral);
+  background: var(--room-color, var(--neutral));
   display: flex; align-items: center; justify-content: center;
   font-size: 20px;
   flex-shrink: 0;
@@ -251,6 +253,61 @@ body.room-window { background: var(--bg-chat); }
   color: var(--fg);
 }
 .header-actions button:hover { background: var(--hover); }
+
+/* ---------- 방 색상 ---------- */
+/* 방 색을 고르면 톡방 전체가 그 색을 띤다 (카톡 테마처럼).
+   파스텔을 그대로 깔면 글씨가 안 읽히므로 color-mix로 원래 배경에 섞는다 — 채팅 바닥은
+   옅게(8%), 머리·발치의 판때기는 그보다 진하게(13%) 해서 층이 그대로 살아 있게 한다.
+   내 말풍선만 원색을 쓴다. 원래 카톡 노랑이 있던 자리라 진해도 글씨가 검정이라 읽힌다. */
+body.room-window.tinted { background: color-mix(in srgb, var(--room-color) 8%, var(--bg-chat)); }
+body.tinted #chat-header,
+body.tinted #notice-panel,
+body.tinted #task-panel,
+body.tinted #composer,
+body.tinted #statusbar { background: color-mix(in srgb, var(--room-color) 13%, var(--bg-header)); }
+body.tinted .msg.user .bubble,
+body.tinted .pending-text { background: var(--room-color); }
+
+/* 색을 고르면 버튼 안이 그 색 동그라미가 되고, 안 골랐으면 🎨가 들어간다.
+   처음엔 색 없음을 "빈 동그라미"로 뒀는데, 투명 배경에 테두리가 헤더와 같은 색이라
+   빈 칸으로 보였다 — 기능이 있는 줄도 모른다. 옆 버튼들처럼 아이콘이 있어야 한다. */
+#color-dot {
+  display: inline-block;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: var(--room-color);
+  vertical-align: -1px;
+}
+
+#color-swatches {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  padding: 4px 0 2px;
+}
+.swatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.swatch:hover { background: var(--hover-soft); }
+.swatch.current { border-color: var(--fg-dim); color: var(--fg); }
+.swatch i {
+  display: block;
+  width: 22px; height: 22px;
+  border-radius: 50%;
+}
+/* "색 없음"은 칠할 게 없으니 점선 동그라미로 빈 자리임을 보여준다 */
+.swatch.none i { border: 1px dashed var(--fg-dim); }
 
 /* 컨텍스트 크기 — 평소엔 조용히, 무거워지면 눈에 띄게 */
 /* 압축 시점 픽커로 가는 입구라 눌리는 것처럼 보여야 한다 */
@@ -345,6 +402,81 @@ mark.search-hit {
 }
 /* 현재 위치한 결과만 뚜렷하게 — 나머지는 은은하게 둬야 눈이 안 피로하다 */
 mark.search-hit.current { background: var(--accent); color: #1a1a1a; }
+
+/* ---------- 공지 패널 (이 방에 영향을 주는 md 파일들) ---------- */
+/* 할 일 패널과 같은 자리를 나눠 쓰므로 생김새를 맞춘다 — 둘 다 떠 있을 때 층이 따로 놀면
+   헤더가 두꺼워 보인다. 다른 점은 접힘이 기본이라는 것뿐이다. */
+#notice-panel {
+  flex-shrink: 0;
+  background: var(--bg-header);
+  border-bottom: 1px solid var(--border);
+  max-height: 45vh;
+  overflow-y: auto;
+}
+#notice-bar {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  background: transparent;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+#notice-bar:hover { background: var(--hover-soft); }
+#notice-caret { flex-shrink: 0; font-size: 9px; }
+#notice-pin { flex-shrink: 0; font-size: 10px; }
+#notice-label { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#notice-count { flex-shrink: 0; font-variant-numeric: tabular-nums; opacity: .75; }
+
+#notice-body { padding: 0 14px 9px; }
+.notice-group { margin-top: 7px; }
+/* 그룹 머리말이 "항상 읽음 / 이름만 올라감"을 가른다 — 이 구분이 이 패널의 요점이다 */
+.notice-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 10.5px;
+  color: var(--fg-dim);
+  opacity: .8;
+  padding: 2px 0 3px;
+}
+.notice-head b { font-weight: 600; opacity: 1; }
+.notice-file {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  width: 100%;
+  padding: 2px 4px;
+  margin-left: -4px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.5;
+  text-align: left;
+  cursor: pointer;
+}
+.notice-file:hover { background: var(--hover-soft); color: var(--fg); }
+.notice-scope { flex-shrink: 0; font-size: 10px; opacity: .65; }
+.notice-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 목록이 길면(스킬 24개) 다 펼치지 않고 접어 둔다 */
+.notice-more {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 11px;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.notice-empty { font-size: 11.5px; color: var(--fg-dim); opacity: .7; padding: 3px 0; }
 
 /* ---------- 할 일 패널 (헤더 아래 고정) ---------- */
 #task-panel {
@@ -896,6 +1028,7 @@ body.light .peer-name { color: hsl(var(--peer-hue, 210) 55% 42%); }
 #model-picker,
 #qr-modal,
 #compact-picker,
+#color-picker,
 #perm-picker {
   position: fixed;
   inset: 0;

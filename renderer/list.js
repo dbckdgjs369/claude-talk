@@ -1,4 +1,5 @@
 const { ipcRenderer } = require('electron');
+const { colorOf } = require('./colors');
 
 const roomListEl = document.getElementById('room-list');
 const rooms = new Map();
@@ -22,13 +23,17 @@ function fmtTime(iso) {
 // Claude 픽셀 캐릭터 아바타. 방 ID 해시로 포즈가 갈린다 (같은 방은 항상 같은 포즈).
 const AVATAR_POSES = 6;
 
-function claudeAvatar(key) {
+// tint = 배경에 깔린 방 색(없으면 null). 파스텔 배경에 주황 캐릭터를 그대로 얹으면 묻힌다 —
+// 회색 배경에서 명도비 3.5였던 게 파스텔 위에서는 1.3~2.0까지 떨어진다. 그래서 색이 있는
+// 방은 몸통을 진한 갈색으로 뒤집고(명도비 7~10), 눈은 배경색으로 칠해 파낸 것처럼 보이게
+// 한다. 눈까지 갈색으로 두면 몸통에 묻혀 사라진다.
+function claudeAvatar(key, tint) {
   let h = 0;
   for (const ch of String(key)) h = (h * 31 + ch.codePointAt(0)) >>> 0;
   const pose = h % AVATAR_POSES;
 
-  const O = '#d97757'; // Claude 오렌지
-  const D = '#2b1a16'; // 눈
+  const O = tint ? '#2b1a16' : '#d97757'; // 몸통 — 평소엔 Claude 오렌지
+  const D = tint || '#2b1a16'; // 눈
   const px = (x, y, w, hh, fill) => `<rect x="${x}" y="${y}" width="${w}" height="${hh}" fill="${fill}"/>`;
 
   const parts = [px(3, 3, 10, 7, O)]; // 몸통
@@ -120,8 +125,11 @@ function render() {
     // 분기 방은 어디서 갈라졌는지 밝힌다 — 이름이 원본과 비슷해 목록에서 헷갈리기 쉽다
     if (r.forkedFrom) preview = `🌿 ${r.forkedFromName || '삭제된 방'}에서 분기 · ${basePreview}`;
 
+    // 방 색은 아바타에만 쓴다. 줄 전체를 칠하면 안읽음 뱃지나 상태 점 같은 원래 신호가
+    // 파스텔에 묻힌다 — 색은 "어느 방인지"만 알려주면 된다.
+    const c = colorOf(r.color);
     el.innerHTML = `
-      <div class="avatar">${claudeAvatar(r.id || r.name)}<div class="status-dot ${r.state}"></div></div>
+      <div class="avatar">${claudeAvatar(r.id || r.name, c?.hex || null)}<div class="status-dot ${r.state}"></div></div>
       <div class="body">
         <div class="name"></div>
         <div class="preview ${working ? 'typing' : ''}"></div>
@@ -130,6 +138,7 @@ function render() {
         <div class="time">${fmtTime(r.time)}</div>
         ${r.unread > 0 ? `<div class="badge">${r.unread}</div>` : ''}
       </div>`;
+    if (c) el.querySelector('.avatar').style.setProperty('--room-color', c.hex);
     el.querySelector('.name').textContent = title;
     el.querySelector('.preview').textContent = preview;
     roomListEl.appendChild(el);

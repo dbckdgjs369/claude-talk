@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Notification, shell } = require('electron');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -19,6 +19,7 @@ const { HeadlessSession, COMPACT_CHOICES } = require('./lib/engine');
 const fs = require('fs');
 const { scanPastSessions, deleteSessionFile, titleForFile, tailInfoForFile, renameSession, normalizeSdkMarkers } = require('./lib/sessions-index');
 const { sessionFileFor, parseFileSync } = require('./lib/transcript');
+const { collectHarness } = require('./lib/harness');
 const { taskSummary, foldTaskOps } = require('./lib/tasks');
 const { UploadServer } = require('./lib/upload-server');
 const {
@@ -84,6 +85,8 @@ function roomSummary(room) {
     compactPick: room.compactAt || null,
     // 폰에서 열어둔 주소(없으면 null). 창을 닫았다 열면 렌더러는 이걸 잊으므로 메인이 알려준다
     phoneToken: uploader.tokenFor(room.id),
+    // 방 색상 (1~8, 안 고르면 null). 목록의 아바타와 방 창 헤더에 같이 쓰인다
+    color: room.color || null,
     // 분기 방이면 목록에서 원본을 알 수 있게 (원본이 삭제됐으면 이름은 비어 있다)
     forkedFrom: room.forkedFrom || null,
     forkedFromName: room.forkedFrom ? store.get(room.forkedFrom)?.aiTitle || store.get(room.forkedFrom)?.name || null : null,
@@ -1254,6 +1257,47 @@ ipcMain.handle('room:setPermissionMode', (e, id, mode) => {
   ensureSession(room).setPermissionMode(mode);
   store.save();
   return mode;
+});
+
+// 방 색상. 1~8이 아니면(null 포함) 색 없음으로 되돌린다 — 팔레트 검증은 렌더러가 아니라
+// 여기서 한다. 세션과 무관한 표시 설정이라 방이 꺼져 있어도 바로 먹는다.
+ipcMain.handle('room:setColor', (e, id, color) => {
+  const room = store.get(id);
+  if (!room) return null;
+  room.color = Number.isInteger(color) && color >= 1 && color <= 8 ? color : undefined;
+  store.save();
+  broadcast(room); // 목록 창의 아바타도 같이 바뀌어야 한다
+  return room.color || null;
+});
+
+// 이 방에 영향을 주는 md 파일들 ("공지" 패널). 디스크를 매번 다시 읽는다 — 파일을 고치고
+// 방으로 돌아왔을 때 낡은 값이 떠 있으면 이 패널을 믿을 수 없게 되고, 열 때 한 번 도는
+// 수십 개 파일 읽기는 어차피 체감이 안 된다.
+ipcMain.handle('room:harness', (e, id) => {
+  const room = store.get(id);
+  if (!room) return null;
+  try {
+    return collectHarness(room.cwd || null);
+  } catch (err) {
+    return { error: String(err.message || err) };
+  }
+});
+
+// 공지 패널에서 파일 클릭 → 기본 편집기로 연다. 경로는 렌더러가 준 값이지만 방금 우리가
+// 넘겨준 목록 안에 있는지 대조하고 연다 — 렌더러가 임의 경로를 열게 두지 않는다.
+ipcMain.handle('room:openHarnessFile', (e, id, file) => {
+  const room = store.get(id);
+  if (!room) return false;
+  let h;
+  try {
+    h = collectHarness(room.cwd || null);
+  } catch {
+    return false;
+  }
+  const known = [...h.memory, ...h.agents, ...h.skills, ...h.commands].some((x) => x.path === file);
+  if (!known) return false;
+  shell.openPath(file);
+  return true;
 });
 
 // 방별 자동 압축 시점. null이면 기본값(AUTO_COMPACT_AT)으로 되돌린다.
