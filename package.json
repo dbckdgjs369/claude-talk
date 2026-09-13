@@ -1,6 +1,6 @@
 {
   "name": "cc-talk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "KakaoTalk-style desktop UI for managing multiple Claude Code sessions",
   "main": "main.js",
   "bin": {
